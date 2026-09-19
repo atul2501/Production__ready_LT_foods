@@ -8,7 +8,7 @@ from app.services.ollama_client import OllamaClient
 
 logger = get_logger(__name__)
 
-PROMPT_VERSION = "v2"
+PROMPT_VERSION = "v3"
 
 # A literal worked example (the canonical example from the SAP field spec) rather than just
 # the abstract JSON schema. Confirmed necessary: Ollama's `format` JSON-schema constraint is
@@ -22,7 +22,7 @@ EXAMPLE_JSON = json.dumps(
         "invoice_header": {
             "invoice_number": "6376-2026-16",
             "invoice_date": "2026-04-20",
-            "due_date": "2026-05-20",
+            "due_date": None,
             "payment_terms": "Net 30",
             "company_code": "",
             "vendor_name": "WS Digital Freight Ltd",
@@ -65,13 +65,14 @@ SYSTEM_INSTRUCTIONS = f"""You are an invoice data extraction assistant. You will
 
 Your output MUST have EXACTLY these three top-level keys: `invoice_header` (an object), `line_items` (an array), `additional_fields` (an array). Do NOT flatten invoice_header's fields to the top level. Do NOT rename any field (use `tax_amount` not `tax`, `total_amount` not `total`, `payment_terms` not `terms`, `vendor_name`/`vendor_address` as flat strings not a nested "vendor" object, `customer_name`/`customer_address` not a nested "buyer"/"ship_to" object). Do NOT add fields that are not in the structure below - anything else goes into `additional_fields`.
 
-Here is a worked example showing the EXACT structure, field names, and nesting to use (the values are just an example, not real data to copy):
+Here is a worked example showing the EXACT structure, field names, and nesting to use (the values are just an example, not real data to copy). Note `due_date` is `null` in this example - that invoice genuinely had no due date printed on it, demonstrating rule 3b below:
 {EXAMPLE_JSON}
 
 STRICT RULES - follow exactly, this data feeds financial accounting systems:
 1. Only use values that literally appear in the provided text. NEVER invent, guess, calculate, or hallucinate a value that is not present in the text.
 2. Exception: `currency` and `company_code` may be reasonably inferred from context (e.g. currency symbols, vendor country) if not explicit in the text.
-3. If a mandatory field is not present in the text, use an empty string "" for header/line text fields, or 0 for missing required numeric fields. Never omit a key.
+3. These fields are MANDATORY and must never be null: `invoice_number`, `invoice_date`, `company_code`, `vendor_name`, `customer_name`, `currency` (header text fields), `subtotal`, `tax_amount`, `total_amount` (header numbers), `description`, `amount` (every line item). If one of these is genuinely not present in the text, use an empty string "" for text fields or 0 for numbers - never omit the key, never use null here.
+3b. EVERY OTHER field is OPTIONAL: `due_date`, `payment_terms`, `vendor_address`, `vendor_tax_id`, `vendor_bank_name`, `vendor_account_no`, `vendor_sort_code`, `vendor_iban`, `customer_address`, `reference_number`, `tax_percent` (header), `line_no`, `quantity`, `unit_price`, `tax_percent` (line item), `reference_code`. If one of these is genuinely not present in the text, use `null` - do NOT use "" or 0 for these, that's only for the mandatory fields in rule 3.
 4. `po_number` must always be present as a key. Use null if no PO number is present anywhere in the text.
 5. `gl_account`, `cost_center`, and `profit_center` on every line item MUST always be null. These are never present on vendor invoices.
 6. Any field in the text that does not correspond to a fixed schema field (e.g. GSTIN, PAN No, Contract No, EAN No, Vessel Reference, Week Ending, "Your Reference") must go into `additional_fields` as {{"field_name": ..., "field_value": ...}}. Never invent a new top-level key.
