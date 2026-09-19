@@ -1,0 +1,108 @@
+import io
+import time
+from abc import ABC, abstractmethod
+
+from app.logging_conf import get_logger
+from app.pipeline.text_extract import ExtractedLine
+
+logger = get_logger(__name__)
+
+
+class OcrEngine(ABC):
+    @abstractmethod
+    def ocr_page_image(self, image_bytes: bytes, page_number: int) -> list[ExtractedLine]: ...
+
+
+class PaddleOcrEngine(OcrEngine):
+    """Primary OCR engine: better multilingual handling (Indian GST/Italian fiscal text)
+    and layout/table awareness than Tesseract, at the cost of a heavier install."""
+
+    def __init__(self, lang: str = "en"):
+        from paddleocr import PaddleOCR  # heavy import, deferred until actually used
+
+        logger.info("ocr_engine_initializing", engine="paddleocr", lang=lang)
+        started = time.monotonic()
+        self._ocr = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
+        logger.info(
+            "ocr_engine_initialized",
+            engine="paddleocr",
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    def ocr_page_image(self, image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
+        import numpy as np
+        from PIL import Image
+
+        started = time.monotonic()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        result = self._ocr.ocr(np.array(image), cls=True)
+
+        lines: list[ExtractedLine] = []
+        for page_result in result or []:
+            for box, (text, confidence) in page_result:
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                bbox = (min(xs), min(ys), max(xs), max(ys))
+                lines.append(
+                    ExtractedLine(page=page_number, text=text, bbox=bbox, confidence=float(confidence))
+                )
+
+        avg_confidence = (sum(line.confidence for line in lines) / len(lines)) if lines else None
+        logger.info(
+            "ocr_page_complete",
+            engine="paddleocr",
+            page=page_number,
+            line_count=len(lines),
+            avg_confidence=avg_confidence,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return lines
+
+
+class TesseractOcrEngine(OcrEngine):
+    """Lighter fallback: easier to containerize, weaker on multilingual/table layouts."""
+
+    def __init__(self, lang: str = "eng"):
+        self.lang = lang
+        logger.info("ocr_engine_initialized", engine="tesseract", lang=lang)
+
+    def ocr_page_image(self, image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
+        import pytesseract
+        from PIL import Image
+
+        started = time.monotonic()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        data = pytesseract.image_to_data(image, lang=self.lang, output_type=pytesseract.Output.DICT)
+
+        lines: list[ExtractedLine] = []
+        for i in range(len(data["text"])):
+            text = data["text"][i].strip()
+            if not text:
+                continue
+            try:
+                confidence = max(float(data["conf"][i]), 0.0) / 100.0
+            except (ValueError, TypeError):
+                confidence = 0.0
+            x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+            lines.append(
+                ExtractedLine(page=page_number, text=text, bbox=(x, y, x + w, y + h), confidence=confidence)
+            )
+
+        avg_confidence = (sum(line.confidence for line in lines) / len(lines)) if lines else None
+        logger.info(
+            "ocr_page_complete",
+            engine="tesseract",
+            page=page_number,
+            line_count=len(lines),
+            avg_confidence=avg_confidence,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return lines
+
+
+def get_ocr_engine(name: str = "paddle") -> OcrEngine:
+    if name == "paddle":
+        return PaddleOcrEngine()
+    if name == "tesseract":
+        return TesseractOcrEngine()
+    raise ValueError(f"unknown OCR engine: {name}")
