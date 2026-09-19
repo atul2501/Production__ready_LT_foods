@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     worker_retry_max_delay_seconds: int = 300
 
     # Retention cleanup (run daily, e.g. via a systemd timer - see deploy/systemd/)
-    retention_days: int = 30
+    retention_days: int = 1  # 24 hours
     retention_batch_size: int = 500
 
     grounding_fuzzy_threshold: float = 90.0
