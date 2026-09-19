@@ -11,3 +11,4 @@ tests/golden/expected/*.json
 
 data/
 logs/
+backups/

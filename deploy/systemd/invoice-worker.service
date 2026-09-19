@@ -1,0 +1,22 @@
+[Unit]
+Description=LT Foods Invoice Extraction Worker (Postgres-backed queue, no broker)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=invoice-service
+Group=invoice-service
+WorkingDirectory=/opt/invoice-service
+EnvironmentFile=/opt/invoice-service/.env
+ExecStart=/opt/invoice-service/.venv/bin/python worker_main.py
+Restart=on-failure
+RestartSec=5
+# SIGTERM lets in-flight jobs finish naturally (runner.py's shutdown_event drains threads
+# before exiting) rather than being cut off mid-pipeline. Real jobs have taken up to ~6.5
+# min in testing, so this needs real headroom - past this, systemd SIGKILLs and the
+# reaper (worker_stale_threshold_seconds) cleans up on the next process start instead.
+TimeoutStopSec=420
+
+[Install]
+WantedBy=multi-user.target

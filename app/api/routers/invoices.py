@@ -10,7 +10,6 @@ from app.api.deps import get_db
 from app.config import settings
 from app.db import models
 from app.logging_conf import get_logger
-from app.queue.tasks import process_invoice
 from app.schemas.envelope import (
     ExtractionMetadata,
     JobCreatedResponse,
@@ -105,9 +104,8 @@ async def upload_invoice(request: Request, db: Session = Depends(get_db)) -> Job
 
     db.commit()
     log.info("job_created", status="queued")
-
-    process_invoice.delay(job_id)
-    log.info("job_enqueued")
+    # No dispatch call needed - the worker polls for status='queued' rows itself
+    # (app/worker/claim.py); inserting the row is the entire handoff.
 
     return JobCreatedResponse(job_id=job_id, status=JobStatus.QUEUED, created_at=job.created_at)
 
@@ -222,15 +220,18 @@ def retry_job(job_id: str, db: Session = Depends(get_db)) -> JobCreatedResponse:
         raise HTTPException(status_code=404, detail="job not found")
 
     job.status = models.JobStatusEnum.queued
-    job.retry_count += 1
+    # A manual retry is a deliberate fresh attempt by a human, not one more automatic
+    # attempt - reset the automatic-retry budget/backoff rather than sharing it, so a job
+    # a human already retried twice doesn't have only one automatic attempt left.
+    job.retry_count = 0
+    job.next_attempt_at = None
+    job.lease_token = None
     job.failure_reason = None
     db.add(
-        models.AuditEvent(job_id=job_id, event_type="retried", event_metadata={"retry_count": job.retry_count})
+        models.AuditEvent(job_id=job_id, event_type="retried", event_metadata={"manual_retry": True})
     )
     db.commit()
-    log.info("job_status_updated", status="queued", retry_count=job.retry_count)
-
-    process_invoice.delay(job_id)
-    log.info("job_enqueued")
+    log.info("job_status_updated", status="queued", manual_retry=True)
+    # No dispatch call needed - see upload_invoice.
 
     return JobCreatedResponse(job_id=job.id, status=JobStatus.QUEUED, created_at=job.created_at)

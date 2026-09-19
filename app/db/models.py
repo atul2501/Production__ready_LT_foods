@@ -43,6 +43,14 @@ class Job(Base):
     failure_reason = Column(Text, nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
     uploaded_by = Column(Text, nullable=True)
+    # Backoff gate for the automatic-retry queue: a queued row with next_attempt_at in the
+    # future is invisible to the claim query's WHERE clause until that time passes -
+    # Postgres itself is the timer, no external scheduler needed.
+    next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    # Set fresh on every claim; every write a worker makes back to this job (heartbeat-free
+    # design: just the final result) is conditioned on matching this token, so a stale/
+    # reclaimed attempt's write is discarded instead of racing the current attempt's result.
+    lease_token = Column(UUID(as_uuid=False), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
 

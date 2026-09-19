@@ -1,10 +1,11 @@
-"""Full upload -> queue -> worker -> persist -> retrieve round trip against a real
-Postgres + Redis (and, unless RUN_INTEGRATION_OLLAMA=1, a stubbed Ollama response so the
-test is fast/deterministic and doesn't depend on model output quality).
+"""Upload -> insert -> persist -> retrieve round trip against a real Postgres. This only
+exercises the API layer (insert + read back) - actually completing a job requires
+worker_main.py running alongside the test (it wasn't testing that before the Celery/Redis
+removal either, so no coverage regression; see test_worker_queue.py and
+test_worker_processing.py for the worker-side logic).
 
-Requires the docker-compose stack (or equivalent Postgres/Redis) to be running and
-DATABASE_URL/REDIS_URL in the environment to point at it - skipped otherwise so `pytest`
-stays fast and dependency-free by default. Run explicitly with:
+Requires a live Postgres matching DATABASE_URL - skipped otherwise so `pytest` stays fast
+and dependency-free by default. Run explicitly with:
 
     RUN_INTEGRATION=1 pytest tests/integration/test_api_upload_flow.py
 """
@@ -14,7 +15,7 @@ import pytest
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_INTEGRATION") != "1",
-    reason="requires a live Postgres/Redis stack; set RUN_INTEGRATION=1 to run",
+    reason="requires a live Postgres matching DATABASE_URL; set RUN_INTEGRATION=1 to run",
 )
 
 

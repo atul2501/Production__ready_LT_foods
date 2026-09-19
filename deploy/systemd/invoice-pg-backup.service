@@ -1,0 +1,10 @@
+[Unit]
+Description=LT Foods invoice Postgres backup (pg_dump, daily/weekly/monthly rotation)
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=invoice-service
+Group=invoice-service
+WorkingDirectory=/opt/invoice-service
+ExecStart=/opt/invoice-service/scripts/pg_backup.sh

@@ -1,7 +1,6 @@
 import os
 
 import httpx
-import redis
 from fastapi import APIRouter, Depends
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -25,13 +24,6 @@ def _dependency_checks() -> dict[str, str]:
         checks["database"] = "ok"
     except Exception as exc:  # noqa: BLE001
         checks["database"] = f"error: {exc}"
-
-    try:
-        client = redis.Redis.from_url(settings.redis_url, socket_connect_timeout=3)
-        client.ping()
-        checks["redis"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        checks["redis"] = f"error: {exc}"
 
     for host in settings.ollama_hosts.split(","):
         host = host.strip()
@@ -64,8 +56,8 @@ def healthz():
 
 @router.get("/readyz")
 def readyz():
-    """Readiness for orchestrators (Docker/Kubernetes healthchecks) - checks every
-    dependency the API needs to actually serve traffic."""
+    """Readiness for process managers/load balancers - checks every dependency the API
+    needs to actually serve traffic."""
     checks = _dependency_checks()
     healthy = all(value == "ok" for value in checks.values())
     return {"status": "ok" if healthy else "degraded", "checks": checks}

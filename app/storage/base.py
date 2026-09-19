@@ -14,3 +14,6 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def exists(self, key: str) -> bool: ...
+
+    @abstractmethod
+    def delete(self, key: str) -> None: ...

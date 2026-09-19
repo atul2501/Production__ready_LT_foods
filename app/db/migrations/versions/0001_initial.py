@@ -14,9 +14,17 @@ down_revision = None
 branch_labels = None
 depends_on = None
 
+
+# create_type=False: this same object is reused across two tables' columns below. Without
+# it, op.create_table's own auto-create-enum side effect tries to CREATE TYPE a second
+# time regardless of the explicit checkfirst=True creation just below, and errors with
+# "type already exists" - a real, previously-undetected bug (this migration had only ever
+# been exercised via Base.metadata.create_all(), never actually run through `alembic
+# upgrade head`, until testing against a fresh native Postgres surfaced it).
 job_status_enum = postgresql.ENUM(
     "queued", "processing", "success", "needs_review", "failed",
     name="job_status",
+    create_type=False,
 )
 
 

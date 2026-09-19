@@ -8,8 +8,8 @@ from app.config import settings
 
 
 def configure_logging() -> None:
-    """Logs JSON lines to stdout (docker compose logs) and, when LOG_FILE is set, also to
-    a file on disk - every line already carries an ISO timestamp (structlog's TimeStamper)
+    """Logs JSON lines to stdout (journalctl under systemd) and, when LOG_FILE is set, also
+    to a file on disk - every line already carries an ISO timestamp (structlog's TimeStamper)
     and every pipeline/task stage logs its own start/complete event, so the file is a full
     start-to-end, timestamped trace per job without any extra work at the call site.
     """

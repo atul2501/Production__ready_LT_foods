@@ -38,3 +38,19 @@ class LocalFileStorage(StorageBackend):
 
     def exists(self, key: str) -> bool:
         return self._path(key).exists()
+
+    def delete(self, key: str) -> None:
+        """Idempotent - safe to call on an already-deleted key (retention cleanup relies
+        on this: a crash mid-batch just retries the same key harmlessly next cycle)."""
+        path = self._path(key)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            # storage_key is "{job_id}/original.pdf" - clean up the now-empty per-job dir
+            # so 30-day cleanup cycles don't leave one empty directory behind forever.
+            path.parent.rmdir()
+        except OSError:
+            pass  # not empty, or already gone - fine either way
+        logger.debug("storage_delete", key=key)
