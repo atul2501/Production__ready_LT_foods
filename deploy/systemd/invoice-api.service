@@ -9,7 +9,14 @@ User=invoice-service
 Group=invoice-service
 WorkingDirectory=/opt/invoice-service
 EnvironmentFile=/opt/invoice-service/.env
-ExecStart=/opt/invoice-service/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+# --workers 4 runs 4 independent Uvicorn processes (the API route itself is stateless -
+# job dispatch is a DB insert the worker pool polls for, not something the API process
+# tracks in memory). Each process opens its own DB pool (pool_size=10 + max_overflow=20 in
+# app/db/base.py), so 4 workers can open up to 120 connections - check
+# `max_connections` on the Postgres server before raising this further, and lower
+# pool_size/max_overflow together with --workers if you do. Tune the worker count to
+# actual CPU core count on the box.
+ExecStart=/opt/invoice-service/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
 Restart=on-failure
 RestartSec=5
 

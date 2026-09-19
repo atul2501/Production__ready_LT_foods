@@ -45,6 +45,10 @@ class Settings(BaseSettings):
 
     ocr_min_confidence: float = 0.80
     digital_text_min_chars_per_page: int = 200
+    # A pathological scanned page (huge/corrupt image) has no other bound on how long OCR
+    # can run - this is what turns that into a clean OcrTimeoutError -> failed/retry instead
+    # of a worker thread hung until the 20-minute reaper eventually reclaims it.
+    ocr_timeout_seconds: int = 90
 
     log_level: str = "INFO"
     # When set, JSON logs are also written to this file path (in addition to stdout) - a

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api.routers import health, invoices
+from app.api.routers import health, invoices, metrics
 from app.logging_conf import configure_logging
 
 configure_logging()
@@ -17,3 +17,4 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(invoices.router)
+app.include_router(metrics.router)

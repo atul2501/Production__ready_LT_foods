@@ -2,6 +2,7 @@ import hashlib
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,35 +39,12 @@ def _check_backlog(db: Session) -> None:
         )
 
 
-@router.post("/invoices", response_model=JobCreatedResponse, status_code=202)
-async def upload_invoice(request: Request, db: Session = Depends(get_db)) -> JobCreatedResponse:
-    """Accepts either a raw binary PDF request body (Postman "binary" body mode,
-    Content-Type: application/pdf or application/octet-stream) or a multipart/form-data
-    upload with a "file" field (browsers, Swagger UI's file picker) - same endpoint, same
-    response either way."""
-    content_type = request.headers.get("content-type", "")
-    filename: str | None = None
-
-    if content_type.startswith("multipart/form-data"):
-        form = await request.form()
-        upload = form.get("file")
-        if upload is None or not hasattr(upload, "read"):
-            logger.warning("upload_rejected", reason="missing_file_field")
-            raise HTTPException(status_code=400, detail="multipart upload must include a 'file' field")
-        content = await upload.read()
-        filename = getattr(upload, "filename", None)
-    else:
-        content = await request.body()
-
-    logger.info("upload_received", filename=filename, content_type=content_type, size_bytes=len(content))
-
-    if not content:
-        logger.warning("upload_rejected", filename=filename, reason="empty_file")
-        raise HTTPException(status_code=400, detail="empty file")
-    if not content.startswith(b"%PDF-"):
-        logger.warning("upload_rejected", filename=filename, reason="not_a_pdf")
-        raise HTTPException(status_code=400, detail="file is not a valid PDF")
-
+def _persist_upload(db: Session, content: bytes, filename: str | None) -> models.Job:
+    """Synchronous body of the upload handler - backlog check, SHA-256 hashing, the disk
+    write, and every DB call (the sync SQLAlchemy/psycopg2 driver blocks). Run via
+    run_in_threadpool below rather than directly in the async route, so one slow/large
+    upload can't stall every other request the single Uvicorn event loop is serving
+    concurrently."""
     _check_backlog(db)
 
     job_id = str(uuid.uuid4())
@@ -106,8 +84,41 @@ async def upload_invoice(request: Request, db: Session = Depends(get_db)) -> Job
     log.info("job_created", status="queued")
     # No dispatch call needed - the worker polls for status='queued' rows itself
     # (app/worker/claim.py); inserting the row is the entire handoff.
+    return job
 
-    return JobCreatedResponse(job_id=job_id, status=JobStatus.QUEUED, created_at=job.created_at)
+
+@router.post("/invoices", response_model=JobCreatedResponse, status_code=202)
+async def upload_invoice(request: Request, db: Session = Depends(get_db)) -> JobCreatedResponse:
+    """Accepts either a raw binary PDF request body (Postman "binary" body mode,
+    Content-Type: application/pdf or application/octet-stream) or a multipart/form-data
+    upload with a "file" field (browsers, Swagger UI's file picker) - same endpoint, same
+    response either way."""
+    content_type = request.headers.get("content-type", "")
+    filename: str | None = None
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            logger.warning("upload_rejected", reason="missing_file_field")
+            raise HTTPException(status_code=400, detail="multipart upload must include a 'file' field")
+        content = await upload.read()
+        filename = getattr(upload, "filename", None)
+    else:
+        content = await request.body()
+
+    logger.info("upload_received", filename=filename, content_type=content_type, size_bytes=len(content))
+
+    if not content:
+        logger.warning("upload_rejected", filename=filename, reason="empty_file")
+        raise HTTPException(status_code=400, detail="empty file")
+    if not content.startswith(b"%PDF-"):
+        logger.warning("upload_rejected", filename=filename, reason="not_a_pdf")
+        raise HTTPException(status_code=400, detail="file is not a valid PDF")
+
+    job = await run_in_threadpool(_persist_upload, db, content, filename)
+
+    return JobCreatedResponse(job_id=job.id, status=JobStatus.QUEUED, created_at=job.created_at)
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)

@@ -1,9 +1,11 @@
+import concurrent.futures
 import hashlib
+import threading
 import time
 from datetime import datetime, timezone
 
 from app.config import settings
-from app.core.exceptions import NoUsableTextError
+from app.core.exceptions import NoUsableTextError, OcrTimeoutError
 from app.logging_conf import get_logger
 from app.pipeline.business_rules import run_business_rules
 from app.pipeline.grounding import ground_extraction
@@ -11,19 +13,43 @@ from app.pipeline.llm_structurer import PROMPT_VERSION, structure_invoice
 from app.pipeline.normalize import normalize_document
 from app.pipeline.ocr import get_ocr_engine
 from app.pipeline.status import assign_status
-from app.pipeline.text_extract import extract_digital_page_text, render_page_image
+from app.pipeline.text_extract import ExtractedLine, extract_digital_page_text, render_page_image
 from app.pipeline.triage import triage_pdf
 
 logger = get_logger(__name__)
 
-_ocr_engine = None
+# One OCR engine per worker thread rather than a single instance shared across the whole
+# thread pool - a shared PaddleOCR instance was suspected to be behind a transient crash
+# under concurrent OCR calls (see README "Key risks"). Thread-local trades a bit of extra
+# memory (one loaded model per worker thread instead of one total) for genuine isolation,
+# which is what actually lets WORKER_CONCURRENCY be raised safely.
+_thread_local = threading.local()
 
 
 def _get_ocr_engine():
-    global _ocr_engine
-    if _ocr_engine is None:
-        _ocr_engine = get_ocr_engine("paddle")
-    return _ocr_engine
+    engine = getattr(_thread_local, "ocr_engine", None)
+    if engine is None:
+        engine = get_ocr_engine("paddle")
+        _thread_local.ocr_engine = engine
+    return engine
+
+
+def _ocr_page_with_timeout(image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
+    """Runs one page's OCR call with a hard wall-clock ceiling. A pathological page
+    (huge/corrupt scan) would otherwise tie up a worker thread with no bound other than the
+    20-minute stale-job reaper. The OCR call itself isn't cancellable mid-flight, so a
+    timeout here abandons waiting on it (the underlying thread runs to completion in the
+    background) rather than actually interrupting it - still converts a hang into a clean,
+    retryable failure instead of a stuck worker."""
+    engine = _get_ocr_engine()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(engine.ocr_page_image, image_bytes, page_number)
+        try:
+            return future.result(timeout=settings.ocr_timeout_seconds)
+        except concurrent.futures.TimeoutError as exc:
+            raise OcrTimeoutError(
+                f"OCR timed out after {settings.ocr_timeout_seconds}s on page {page_number}"
+            ) from exc
 
 
 def _ms_since(start: float) -> int:
@@ -69,7 +95,7 @@ def run_pipeline(pdf_bytes: bytes, job_id: str) -> dict:
             page_sources[page.page_number] = "digital"
         else:
             image_bytes = render_page_image(pdf_bytes, page.page_number)
-            lines = _get_ocr_engine().ocr_page_image(image_bytes, page.page_number)
+            lines = _ocr_page_with_timeout(image_bytes, page.page_number)
             page_sources[page.page_number] = "ocr"
         all_lines.extend(lines)
         log.debug(

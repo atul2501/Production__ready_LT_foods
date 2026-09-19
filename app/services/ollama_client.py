@@ -7,6 +7,7 @@ import httpx
 from app.config import settings
 from app.core.exceptions import LLMFormatError
 from app.logging_conf import get_logger
+from app.metrics import OLLAMA_EVAL_TOKENS, OLLAMA_REQUESTS
 
 logger = get_logger(__name__)
 
@@ -74,20 +75,25 @@ class OllamaClient:
                 error=detail,
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
+            OLLAMA_REQUESTS.labels(outcome="error").inc()
             raise LLMFormatError(f"Ollama request failed ({host}): {detail}") from exc
 
         duration_ms = int((time.monotonic() - started) * 1000)
         body = response.json()
         raw = body.get("response", "")
+        eval_count = body.get("eval_count")
         logger.info(
             "ollama_request_complete",
             host=host,
             model=self.model,
             response_chars=len(raw),
-            eval_count=body.get("eval_count"),
+            eval_count=eval_count,
             eval_duration_ns=body.get("eval_duration"),
             duration_ms=duration_ms,
         )
+        OLLAMA_REQUESTS.labels(outcome="success").inc()
+        if eval_count:
+            OLLAMA_EVAL_TOKENS.inc(eval_count)
 
         try:
             return json.loads(raw)

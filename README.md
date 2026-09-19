@@ -89,6 +89,9 @@ production redundancy via systemd, not extra replicas).
 - **GET** `http://localhost:8000/api/v1/health` — versioned health check: database/ollama/storage
   status plus current queue depth (`queued_jobs`, `processing_jobs`, `backlog_full`). Use this one for
   monitoring dashboards/Postman; `/healthz` and `/readyz` (unprefixed) are for process-manager probes.
+- **GET** `http://localhost:8000/metrics` — Prometheus scrape endpoint: queue depth gauges,
+  job-outcome counters (`invoice_jobs_completed_total{status=...}`), pipeline duration histogram,
+  and Ollama request/token counters (a spend proxy). See [Monitoring](#monitoring) below.
 
 Or run `./scripts/smoke_test.sh path/to/sample.pdf` for the same flow via curl.
 
@@ -135,6 +138,30 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now invoice-api invoice-worker invoice-cleanup.timer invoice-pg-backup.timer
 ```
 
+`invoice-api.service` runs Uvicorn with `--workers 4` (tune to actual CPU core count) rather
+than a single process — the API route itself is stateless (job handoff is a DB insert the
+worker pool polls for, not in-memory state), and blocking work in the upload path (hashing,
+disk write, DB calls) already runs via `run_in_threadpool` so it doesn't stall the event
+loop either way. Each worker process opens its own DB pool (`pool_size=10` +
+`max_overflow=20`, see `app/db/base.py`) — check Postgres `max_connections` before raising
+`--workers` further.
+
+## Monitoring
+
+`GET /metrics` (Prometheus text format, see `app/metrics.py` + `app/api/routers/metrics.py`)
+exposes:
+- `invoice_jobs_queued` / `invoice_jobs_processing` — current queue depth (same numbers as
+  `/api/v1/health`, refreshed on every scrape).
+- `invoice_jobs_completed_total{status="success"|"needs_review"|"failed"}` — job outcomes;
+  alert on a rising `needs_review` or `failed` share of the total.
+- `invoice_pipeline_duration_seconds` — end-to-end pipeline duration histogram.
+- `invoice_ollama_requests_total{outcome=...}` and `invoice_ollama_eval_tokens_total` — a
+  spend proxy for Ollama Cloud usage; alert on a sustained jump in either.
+
+This gets metrics into a scrapeable form but doesn't stand up Prometheus/Alertmanager or
+wire actual alert rules/notification channels — that still needs to be pointed at your own
+monitoring stack.
+
 ## Resilience
 
 - **Worker crash recovery**: a reaper thread reclaims jobs stuck in `processing` (crash,
@@ -171,6 +198,11 @@ RUN_INTEGRATION=1 pytest tests/integration      # requires a live Postgres match
 python -m tests.golden.run_golden_set           # once tests/golden/samples + expected/ are populated
 ```
 
+`.github/workflows/ci.yml` runs unit tests on every push/PR to `main`, plus a manual-only
+`golden-set` job (Actions tab → "Run workflow") that runs the same golden-set command in CI —
+a no-op until the samples/expected dirs below are populated, and never triggered
+automatically since every real run costs Ollama Cloud inference.
+
 `tests/integration/test_worker_queue.py` covers the two correctness-critical pieces of the
 queue directly against real Postgres (not mockable): concurrent `SKIP LOCKED` claiming
 across threads (no duplicates, none skipped) and stale-job reaping.
@@ -189,17 +221,39 @@ crash recovery and backup/restore. What's still genuinely open:
   credentials) before production.
 - **No TLS.** The API serves plain HTTP — put it behind a reverse proxy (nginx/Caddy) with
   a real certificate before exposing it beyond localhost.
-- **No monitoring/alerting** on the structured logs — a spike in `needs_review` rate, a
-  sustained failure rate, or an Ollama Cloud cost blowout would go unnoticed until someone
-  checks manually.
+- **Metrics are exposed but not alerted on.** `GET /metrics` (see
+  [Monitoring](#monitoring)) gives Prometheus-scrapeable job-outcome, queue-depth, and
+  Ollama-usage series, but nothing currently scrapes it or fires an alert — a spike in
+  `needs_review` rate, a sustained failure rate, or an Ollama Cloud cost blowout would still
+  go unnoticed until someone checks manually or points a monitoring stack at the endpoint.
 - **`company_code`/`currency`** are inference-heavy (nothing to ground against) and are
   always flagged for review by design — build out `app/services/vendor_hints.py` with
   validated vendor-specific rules to reduce this over time.
-- Golden-set regression testing is wired up but inert until the 306 sample PDFs (and
-  their manually-verified expected JSON) are dropped into `tests/golden/samples/` and
+- Golden-set regression testing is wired up (including a manual CI job, see
+  [Testing](#testing)) but still inert until the 306 sample PDFs (and their
+  manually-verified expected JSON) are dropped into `tests/golden/samples/` and
   `tests/golden/expected/` — today's confidence comes from manual smoke tests, not an
   automated, repeatable accuracy gate.
 - A transient PaddleOCR crash was observed once on a real scanned invoice (self-healed on
-  retry) — root cause not fully diagnosed, suspected thread-safety interaction with
-  concurrent OCR in the worker's thread pool. Watch for recurrence if scanned-PDF volume grows.
-- One Postgres instance, no replication — see [Resilience](#resilience) above.
+  retry), suspected to be a thread-safety interaction from sharing one `PaddleOCR` instance
+  across the worker's thread pool. Fixed by giving each worker thread its own OCR engine
+  instance (`app/pipeline/run.py`) instead of a shared global one, and OCR calls now have an
+  explicit `OCR_TIMEOUT_SECONDS` ceiling so a hung/pathological page fails cleanly instead of
+  tying up a worker thread indefinitely. Not yet re-verified under sustained load at a
+  raised `WORKER_CONCURRENCY` — do that (re-run `./scripts/smoke_test.sh` or the golden set
+  at the higher concurrency) before relying on it at volume.
+- **No API authentication, no rate limiting, secrets in plaintext `.env`, no TLS** — still
+  fully open, deliberately out of scope for the current round of changes. Required before
+  exposing this beyond localhost; see the top of this section.
+- `company_code`/`currency` are inference-heavy (nothing to ground against) and are always
+  flagged for review by design — build out `app/services/vendor_hints.py` with validated
+  vendor-specific rules to reduce this over time. Left empty here since populating it needs
+  real, verified vendor data, not invented entries.
+- One Postgres instance, no replication — see [Resilience](#resilience) above. Moving to a
+  managed/replicated Postgres (e.g. RDS-style) is an infrastructure decision outside what a
+  code change alone can provide.
+- At `WORKER_CONCURRENCY=3` and the ~46.7s/PDF average measured in `logs/smoke_test_report.json`,
+  steady-state throughput is still well under 200,000 PDFs/month (~6,600/day) — closing that
+  gap means raising `WORKER_CONCURRENCY` in step with a higher-tier (higher-cost) Ollama
+  Cloud plan, or evaluating self-hosted GPU inference; watch `invoice_ollama_requests_total`
+  and `invoice_ollama_eval_tokens_total` (see [Monitoring](#monitoring)) once you do.

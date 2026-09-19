@@ -7,6 +7,7 @@ from app.config import settings
 from app.core.exceptions import ExtractionError
 from app.db import models
 from app.logging_conf import get_logger
+from app.metrics import JOBS_COMPLETED, PIPELINE_DURATION_SECONDS
 from app.pipeline.run import run_pipeline
 from app.storage.local_fs import LocalFileStorage
 
@@ -75,6 +76,7 @@ def process_job(session: Session, job_id: str, lease_token: str) -> None:
                 return
             _record_audit_event(session, job_id, "failed", {"error": str(exc)})
             session.commit()
+            JOBS_COMPLETED.labels(status="failed").inc()
             log.error("extraction_failed", error=str(exc))
             return
 
@@ -102,6 +104,8 @@ def process_job(session: Session, job_id: str, lease_token: str) -> None:
             {"status": result["status"], "processing_time_ms": result["processing_time_ms"]},
         )
         session.commit()
+        JOBS_COMPLETED.labels(status=result["status"]).inc()
+        PIPELINE_DURATION_SECONDS.observe(result["processing_time_ms"] / 1000)
         log.info("extraction_persisted", extraction_id=extraction.id, status=result["status"])
         log.info("job_complete", status=result["status"])
 
@@ -118,6 +122,7 @@ def process_job(session: Session, job_id: str, lease_token: str) -> None:
             job.status = models.JobStatusEnum.failed
             job.failure_reason = f"max retries exceeded: {exc}"
             _record_audit_event(session, job_id, "failed", {"error": str(exc)})
+            JOBS_COMPLETED.labels(status="failed").inc()
             log.error("max_retries_exceeded", error=str(exc))
         else:
             job.retry_count += 1
