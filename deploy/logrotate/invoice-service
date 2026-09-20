@@ -1,0 +1,18 @@
+# Rotates the app's own LOG_FILE (app/logging_conf.py) - separate from stdout, which
+# systemd already sends to journald with its own retention (journalctl --vacuum-time).
+# Path must match LOG_FILE in the production .env - default is /opt/invoice-service/logs/app.log
+# (WorkingDirectory in deploy/systemd/*.service is /opt/invoice-service).
+#
+# Install: sudo cp deploy/logrotate/invoice-service /etc/logrotate.d/invoice-service
+# logrotate itself runs from cron.daily on any standard distro - no separate timer needed.
+/opt/invoice-service/logs/app.log {
+    daily
+    rotate 1
+    compress
+    missingok
+    notifempty
+    # The app holds the file open via a plain logging.FileHandler (no SIGHUP-triggered
+    # reopen), so copytruncate is used instead of rotate+signal: it copies the current
+    # content aside then truncates the live file in place, no service restart needed.
+    copytruncate
+}

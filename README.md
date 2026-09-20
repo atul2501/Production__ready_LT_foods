@@ -21,9 +21,11 @@ worker_main.py (a thread pool within one process, app/worker/)
    each thread loops: claim one queued+due job (Postgres `SELECT ... FOR UPDATE
    SKIP LOCKED`, race-safe with no external broker), then:
      1. triage        - digital text-layer PDF vs scanned/image PDF (per page)
-     2. extract/OCR    - PyMuPDF (digital) / PaddleOCR (scanned) -> source_text
-     3. LLM structure  - Ollama turns source_text into the exact JSON schema
-                          (JSON-schema-constrained, temperature=0)
+     2. extract/OCR    - PyMuPDF (digital, inline) / PaddleOCR (scanned, submitted to
+                          a shared OCR_PAGE_WORKERS-sized pool so every scanned page
+                          in a document OCRs concurrently) -> source_text
+     3. LLM structure  - Ollama (gemma4:31b by default) turns source_text into the
+                          exact JSON schema (JSON-schema-constrained, temperature=0)
      4. grounding      - every field the LLM output is re-verified against source_text
      5. business rules - mandatory fields, subtotal+tax=total, line_items non-empty
      6. status assign  - success / needs_review / failed + flags[]
@@ -49,6 +51,15 @@ distributed cluster, and the `jobs` table is already the durable source of truth
 a second stateful service just to hand off "a row is ready" duplicates what Postgres
 already does natively via `SKIP LOCKED`, at the cost of an entire extra class of failure
 modes (broker visibility timeouts, duplicate redelivery) that a DB-native queue doesn't have.
+
+**Why a shared bounded pool for OCR, not one thread per page:** a page's OCR call needs its
+own `PaddleOCR` instance (a shared instance across concurrent calls was traced to a real
+transient crash — see [Key risks](#key-risks-read-before-treating-this-as-fully-production-ready)),
+and each loaded instance has a real memory cost. `OCR_PAGE_WORKERS` (`app/pipeline/run.py`)
+is one pool shared by every job the worker processes, not a new pool per job — so the number
+of PaddleOCR instances loaded process-wide stays fixed at `OCR_PAGE_WORKERS` regardless of
+`WORKER_CONCURRENCY` or how many pages are in flight, while still letting every scanned page
+in one document run concurrently instead of one at a time.
 
 ## Running it locally
 
@@ -93,21 +104,25 @@ production redundancy via systemd, not extra replicas).
   job-outcome counters (`invoice_jobs_completed_total{status=...}`), pipeline duration histogram,
   and Ollama request/token counters (a spend proxy). See [Monitoring](#monitoring) below.
 
-## Extraction engine: Ollama Cloud
+## Extraction engine: Ollama Cloud (gemma4:31b)
 
-The extraction engine runs on [Ollama Cloud](https://ollama.com) by default — faster and more accurate
-than self-hosting on typical hardware (verified: ~20s/PDF vs ~100s/PDF, and it fixed real extraction
-errors the self-hosted model made, see `metadata.model_name` on any result). This is paid (GPU-time
-billed) and your invoice text leaves your infrastructure — a deliberate trade-off, not an oversight.
+The current model is **`gemma4:31b`** (`OLLAMA_MODEL` in `.env`), run on
+[Ollama Cloud](https://ollama.com) by default — faster and more accurate than self-hosting on
+typical hardware, and it's the only place the model name lives (see `metadata.model_name` on
+any result). This is paid (GPU-time billed) and your invoice text leaves your infrastructure —
+a deliberate trade-off, not an oversight. The model has changed before this project went
+through `qwen2.5:7b-instruct` (self-hosted) then `deepseek-v4.1-flash` (Ollama Cloud) before
+landing on the current `gemma4:31b` — each swap was a one-line `.env` change with no code
+changes, which is the point of keeping the model name in exactly one setting.
 
 **No cloud provider — Ollama included — guarantees a given model name stays available forever.**
-Model catalogs get rotated as better models ship; you'll get a retirement notice like the one that
-prompted this section, typically with days-to-weeks of notice. Two things reduce (not eliminate) the
-risk:
+Model catalogs get rotated as better models ship; you'll get a retirement notice like the ones
+that prompted the earlier model swaps above, typically with days-to-weeks of notice. Two things
+reduce (not eliminate) the risk:
 - `OLLAMA_MODEL` is the only place the model name lives — swapping it is a one-line `.env` change plus
   a worker restart (`systemctl restart invoice-worker` in production), no code changes.
-- Prefer rolling/family tags with no date suffix (`deepseek-v4.1-flash`) over dated snapshots
-  (`deepseek-v4-flash:0731`) — dated snapshots are retired first.
+- Prefer rolling/family tags with no date suffix (e.g. `gemma4:31b`) over dated snapshots
+  (e.g. `gemma4:31b-0731`) — dated snapshots are retired first.
 
 If a retirement notice ever needs an immediate response and you can't switch cloud models fast enough,
 self-hosting (`OLLAMA_HOSTS=http://localhost:11434`, no `OLLAMA_API_KEY`, running the native `ollama
@@ -116,6 +131,42 @@ serve` binary) is the fallback with zero vendor-retirement exposure — see the 
 
 No code or architecture change needed — [OllamaClient](app/services/ollama_client.py) sends the same
 request either way, just with an `Authorization: Bearer` header attached when `OLLAMA_API_KEY` is set.
+
+## Capacity planning: handling 200,000 PDFs/month
+
+200,000 PDFs/month averages to **~0.077 jobs/sec** (200,000 ÷ 30 days ÷ 86,400s), i.e. one
+job roughly every 13 seconds around the clock — a low bar in absolute terms, but real traffic
+is bursty, not evenly spread, so the actual constraint is peak concurrent throughput, not the
+monthly average:
+
+- **Per-job time is dominated by the Ollama call**, not OCR or the rest of the pipeline (every
+  stage logs its own `duration_ms` — see [Monitoring](#monitoring) — so this is measurable
+  per job, not a guess). A digital-text invoice skips OCR entirely; a scanned one now OCRs all
+  its pages concurrently (`OCR_PAGE_WORKERS`, see [Architecture](#architecture)) instead of
+  page-by-page, so OCR's contribution to per-job time no longer scales with page count the way
+  it used to.
+- **Sustained throughput ≈ `WORKER_CONCURRENCY ÷ average job time`.** At `WORKER_CONCURRENCY=3`
+  (the `.env.example` default) and a job time in the tens of seconds, this comfortably clears
+  0.077 jobs/sec with headroom for bursts. Raising `WORKER_CONCURRENCY` scales this linearly —
+  as long as the next constraint below allows it.
+- **The real ceiling is your Ollama Cloud plan's concurrent-request limit**, not CPU/OCR — see
+  the tiers noted in `.env.example` (Free: low, Pro: ~3, Max/Team: ~10). Setting
+  `WORKER_CONCURRENCY` above your plan's concurrent-request limit doesn't add throughput; the
+  excess requests just queue on Ollama's side. Watch `invoice_ollama_requests_total` and
+  `invoice_ollama_eval_tokens_total` (Prometheus) to see actual concurrent usage and spend.
+- **Self-hosted Ollama does not scale the same way**: a single local GPU serializes inference,
+  so `WORKER_CONCURRENCY` should stay at `1` when self-hosting. At `1` concurrent job, clearing
+  0.077 jobs/sec needs an average job time under ~13s — hardware-dependent, and not something
+  to assume without measuring on the actual box. This is why Ollama Cloud (or a multi-GPU
+  self-hosted setup, outside what this codebase manages) is the practical choice at this volume.
+- **Postgres and PaddleOCR are not the bottleneck at this volume**: job claiming is a single
+  indexed `SELECT ... FOR UPDATE SKIP LOCKED` (see [Database](#database)), and
+  `OCR_PAGE_WORKERS` bounds OCR to a fixed, CPU-bound cost per page independent of queue depth.
+  Neither needs to scale for 200k/month; the Ollama concurrent-request limit does.
+
+In short: to actually sustain 200k/month, size `WORKER_CONCURRENCY` to your Ollama Cloud plan's
+concurrent-request limit (raise the plan tier if needed), and use the per-stage timing logs /
+`invoice_pipeline_duration_seconds` histogram to confirm real per-job time rather than assuming it.
 
 ## Production deployment (systemd)
 
@@ -138,9 +189,55 @@ sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/ && 
 than a single process — the API route itself is stateless (job handoff is a DB insert the
 worker pool polls for, not in-memory state), and blocking work in the upload path (hashing,
 disk write, DB calls) already runs via `run_in_threadpool` so it doesn't stall the event
-loop either way. Each worker process opens its own DB pool (`pool_size=10` +
-`max_overflow=20`, see `app/db/base.py`) — check Postgres `max_connections` before raising
-`--workers` further.
+loop either way.
+
+## Database
+
+Postgres is both the system of record and the job queue — no broker, no cache layer.
+
+- **Queue mechanics**: `claim_next_job` (`app/worker/claim.py`) is a single statement —
+  `UPDATE jobs SET status='processing' ... WHERE id = (SELECT id FROM jobs WHERE
+  status='queued' ... FOR UPDATE SKIP LOCKED LIMIT 1)` — so any number of worker threads can
+  claim concurrently with zero coordination code; Postgres's own row-lock manager arbitrates
+  it, and `SKIP LOCKED` means a busy claimant never blocks another one, it just takes a
+  different row. Indexed on `status` (`Job.status`) and `file_hash` (duplicate-upload
+  detection), so claiming and lookups stay O(log n) as the table grows.
+- **Connection pooling**: each process (API or worker) opens its own pool —
+  `pool_size=10` + `max_overflow=20`, `pool_pre_ping=True` (`app/db/base.py`) — so a stale
+  connection is detected and replaced before use rather than surfacing as a query failure.
+  With `invoice-api.service` running `--workers 4`, the API alone can open up to
+  `4 × (10+20) = 120` connections; check Postgres `max_connections` before raising `--workers`
+  or the worker's pool further, and lower `pool_size`/`max_overflow` together with `--workers`
+  if you do.
+- **Retention**: `app/worker/retention.py` (daily via `invoice-cleanup.timer`) deletes
+  completed jobs (`success`/`needs_review`/`failed`) and their stored PDFs once
+  `RETENTION_DAYS` (default **1**, i.e. 24 hours) old — batched
+  (`RETENTION_BATCH_SIZE`, default 500), file-deleted-before-row so a crash mid-run just
+  retries the same rows on the next run instead of leaking orphaned files. `queued`/
+  `processing` jobs are never touched regardless of age. A 24-hour default is deliberately
+  short — raise `RETENTION_DAYS` in `.env` if the review queue needs a longer window to look
+  back at completed extractions.
+- **Backups**: see [Resilience](#resilience) below for the daily/weekly/monthly schedule and
+  restore command.
+
+## Logging
+
+- **stdout**: structured JSON (via `structlog`, `app/logging_conf.py`) — every pipeline stage
+  logs its own start/complete event with a `duration_ms`, correlated by `job_id`, so a slow or
+  wrong extraction can be traced back to the exact stage that caused it without extra
+  instrumentation (see [Capacity planning](#capacity-planning-handling-200000-pdfsmonth)).
+  Under systemd this goes to `journalctl`, which has its own independent retention
+  (`journalctl --vacuum-time`) — nothing extra to manage there.
+- **`LOG_FILE`** (optional, off by default): when set, the same JSON lines are also appended
+  to a file on disk. This file has **no built-in size/age cap** — `RETENTION_DAYS` only
+  governs DB job rows + stored PDFs (see [Database](#database) above), never this file.
+  `deploy/logrotate/invoice-service` rotates it daily via the OS's standard `logrotate`
+  (already run from `cron.daily` on any normal distro — no separate timer needed):
+  ```bash
+  sudo cp deploy/logrotate/invoice-service /etc/logrotate.d/invoice-service
+  ```
+  Update the path inside that file first if `LOG_FILE` isn't the default
+  `/opt/invoice-service/logs/app.log`.
 
 ## Monitoring
 
@@ -176,10 +273,7 @@ monitoring stack.
   gunzip -c backups/postgres/daily/invoices-<date>.sql.gz | psql -U invoice -d invoices
   ```
   Test this occasionally — an unverified backup isn't a real backup.
-- **Retention cleanup**: `app/worker/retention.py` (daily via `invoice-cleanup.timer`)
-  deletes completed jobs (`success`/`needs_review`/`failed`) and their stored PDFs once
-  `RETENTION_DAYS` (default 30) old — batched, file-deleted-before-row for self-healing on
-  a crash mid-run. `queued`/`processing` jobs are never touched regardless of age.
+- **Retention cleanup**: see [Database](#database) above (`RETENTION_DAYS`, default 1 day).
 - **Still a single machine**: one Postgres instance, no replication/failover — backups
   reduce data-loss risk, but a host failure still means downtime until manually recovered.
   Managed Postgres (RDS-style) or real clustering is the next step before multi-machine/HA.
@@ -206,19 +300,16 @@ What's still genuinely open:
   every job needs a human to confirm these two fields.
 - A transient PaddleOCR crash was observed once on a real scanned invoice (self-healed on
   retry), suspected to be a thread-safety interaction from sharing one `PaddleOCR` instance
-  across the worker's thread pool. Fixed by giving each worker thread its own OCR engine
-  instance (`app/pipeline/run.py`) instead of a shared global one, and OCR calls now have an
-  explicit `OCR_TIMEOUT_SECONDS` ceiling so a hung/pathological page fails cleanly instead of
-  tying up a worker thread indefinitely. Not yet re-verified under sustained load at a
-  raised `WORKER_CONCURRENCY`.
-- Scanned pages within one document now OCR concurrently on a shared pool sized by
-  `OCR_PAGE_WORKERS` (`app/pipeline/run.py`), rather than one at a time — each pool thread
-  still gets its own isolated OCR engine instance, same isolation principle as above. The
-  pool's internal queue is unbounded, so under heavy load a page can wait behind others
-  before it starts; `OCR_TIMEOUT_SECONDS` measures from submission, so a burst of traffic
-  can trip a page's timeout on queue wait rather than a genuinely hung page. That's an
-  accepted tradeoff — the job just fails cleanly and retries via the existing
-  `WORKER_MAX_RETRIES`/backoff, rather than needing separate handling here.
+  across concurrent OCR calls. Fixed by giving each concurrently-active thread its own OCR
+  engine instance instead of a shared global one — now scoped to the shared `OCR_PAGE_WORKERS`
+  pool (`app/pipeline/run.py`) that OCRs every scanned page of a document concurrently rather
+  than one at a time, so the same isolation principle now covers page-level parallelism too,
+  not just cross-job parallelism. `OCR_TIMEOUT_SECONDS` gives each page a wall-clock ceiling
+  so a hung/pathological page fails cleanly instead of tying up a thread indefinitely — though
+  since the pool's internal queue is unbounded, that timeout is measured from submission, so a
+  heavy burst can trip it on queue wait rather than a genuinely hung page. Accepted tradeoff:
+  a tripped timeout just fails that job cleanly and retries via `WORKER_MAX_RETRIES`/backoff.
+  Not yet re-verified under sustained load at a raised `WORKER_CONCURRENCY`.
 - **No API authentication, no rate limiting, secrets in plaintext `.env`, no TLS** — still
   fully open. Required before exposing this beyond localhost.
 - One Postgres instance, no replication — see [Resilience](#resilience) above. Moving to a
