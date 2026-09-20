@@ -18,11 +18,30 @@ from app.pipeline.triage import triage_pdf
 
 logger = get_logger(__name__)
 
-# One OCR engine per worker thread rather than a single instance shared across the whole
-# thread pool - a shared PaddleOCR instance was suspected to be behind a transient crash
-# under concurrent OCR calls (see README "Key risks"). Thread-local trades a bit of extra
-# memory (one loaded model per worker thread instead of one total) for genuine isolation,
-# which is what actually lets WORKER_CONCURRENCY be raised safely.
+# Shared, bounded thread pool that OCRs scanned pages, sized by ocr_page_workers rather than
+# one pool per job - this keeps the number of concurrently-loaded PaddleOCR instances equal
+# to ocr_page_workers process-wide no matter how many jobs (worker_concurrency) or pages are
+# in flight at once, instead of multiplying worker_concurrency by pages-in-flight.
+_ocr_executor_lock = threading.Lock()
+_ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _get_ocr_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _ocr_executor
+    if _ocr_executor is None:
+        with _ocr_executor_lock:
+            if _ocr_executor is None:
+                _ocr_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=settings.ocr_page_workers, thread_name_prefix="ocr-page"
+                )
+    return _ocr_executor
+
+
+# One OCR engine per OCR-pool thread rather than a single instance shared across the pool -
+# a shared PaddleOCR instance was suspected to be behind a transient crash under concurrent
+# OCR calls (see README "Key risks"). Thread-local trades a bit of extra memory (one loaded
+# model per pool thread, bounded by ocr_page_workers) for genuine isolation, which is what
+# actually lets pages be OCR'd concurrently - both within one job and across jobs - safely.
 _thread_local = threading.local()
 
 
@@ -34,22 +53,35 @@ def _get_ocr_engine():
     return engine
 
 
-def _ocr_page_with_timeout(image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
-    """Runs one page's OCR call with a hard wall-clock ceiling. A pathological page
-    (huge/corrupt scan) would otherwise tie up a worker thread with no bound other than the
-    20-minute stale-job reaper. The OCR call itself isn't cancellable mid-flight, so a
-    timeout here abandons waiting on it (the underlying thread runs to completion in the
-    background) rather than actually interrupting it - still converts a hang into a clean,
-    retryable failure instead of a stuck worker."""
+def _ocr_page(pdf_bytes: bytes, page_number: int) -> list[ExtractedLine]:
+    """Renders and OCRs one page. Runs entirely on an OCR-pool thread, so rendering
+    (PyMuPDF) and recognition (PaddleOCR) for different pages overlap too, not just OCR."""
+    image_bytes = render_page_image(pdf_bytes, page_number)
     engine = _get_ocr_engine()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(engine.ocr_page_image, image_bytes, page_number)
-        try:
-            return future.result(timeout=settings.ocr_timeout_seconds)
-        except concurrent.futures.TimeoutError as exc:
-            raise OcrTimeoutError(
-                f"OCR timed out after {settings.ocr_timeout_seconds}s on page {page_number}"
-            ) from exc
+    return engine.ocr_page_image(image_bytes, page_number)
+
+
+def _submit_ocr_page(pdf_bytes: bytes, page_number: int) -> "concurrent.futures.Future[list[ExtractedLine]]":
+    """Submits one page's OCR work to the shared pool without blocking, so every scanned
+    page in a document can be in flight at once instead of one at a time."""
+    return _get_ocr_executor().submit(_ocr_page, pdf_bytes, page_number)
+
+
+def _await_ocr_page(
+    future: "concurrent.futures.Future[list[ExtractedLine]]", page_number: int
+) -> list[ExtractedLine]:
+    """Waits for one page's OCR result with a hard wall-clock ceiling. A pathological page
+    (huge/corrupt scan), or a saturated OCR pool under heavy load, would otherwise tie up
+    this job with no bound other than the 20-minute stale-job reaper. The OCR call itself
+    isn't cancellable mid-flight, so a timeout here abandons waiting on it (the pool thread
+    runs it to completion in the background) rather than actually interrupting it - still
+    converts a hang into a clean, retryable failure instead of a stuck job."""
+    try:
+        return future.result(timeout=settings.ocr_timeout_seconds)
+    except concurrent.futures.TimeoutError as exc:
+        raise OcrTimeoutError(
+            f"OCR timed out after {settings.ocr_timeout_seconds}s on page {page_number}"
+        ) from exc
 
 
 def _ms_since(start: float) -> int:
@@ -87,23 +119,28 @@ def run_pipeline(pdf_bytes: bytes, job_id: str) -> dict:
 
     # --- Stage 2: extract / OCR ---
     stage_started = time.monotonic()
-    all_lines = []
+    all_lines: list[ExtractedLine] = []
     page_sources: dict[int, str] = {}
+
+    # Scanned pages are independent of each other, so submit them all to the shared OCR
+    # pool up front and let them run concurrently, instead of OCR'ing one page at a time.
+    # normalize_document re-sorts every line by (page, position) below, so it doesn't
+    # matter what order results come back in here.
+    ocr_futures: dict[int, "concurrent.futures.Future[list[ExtractedLine]]"] = {}
     for page in pages:
         if page.is_digital:
             lines = extract_digital_page_text(pdf_bytes, page.page_number)
             page_sources[page.page_number] = "digital"
+            all_lines.extend(lines)
+            log.debug("page_extracted", page=page.page_number, source="digital", line_count=len(lines))
         else:
-            image_bytes = render_page_image(pdf_bytes, page.page_number)
-            lines = _ocr_page_with_timeout(image_bytes, page.page_number)
             page_sources[page.page_number] = "ocr"
+            ocr_futures[page.page_number] = _submit_ocr_page(pdf_bytes, page.page_number)
+
+    for page_number, future in ocr_futures.items():
+        lines = _await_ocr_page(future, page_number)
         all_lines.extend(lines)
-        log.debug(
-            "page_extracted",
-            page=page.page_number,
-            source=page_sources[page.page_number],
-            line_count=len(lines),
-        )
+        log.debug("page_extracted", page=page_number, source="ocr", line_count=len(lines))
 
     if not all_lines:
         log.error("extraction_failed", reason="no_text_on_any_page")

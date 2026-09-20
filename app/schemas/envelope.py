@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.schemas.invoice_schema import AdditionalField, InvoiceHeader, LineItem
 
@@ -23,6 +23,10 @@ class ValidationFlag(BaseModel):
 
 
 class ExtractionMetadata(BaseModel):
+    # model_name isn't one of pydantic's own model_* methods, just our field name - silence
+    # pydantic's protected-namespace warning rather than renaming a field the API returns.
+    model_config = ConfigDict(protected_namespaces=())
+
     flags: list[ValidationFlag] = []
     model_name: Optional[str] = None
     prompt_version: Optional[str] = None

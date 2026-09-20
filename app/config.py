@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # can run - this is what turns that into a clean OcrTimeoutError -> failed/retry instead
     # of a worker thread hung until the 20-minute reaper eventually reclaims it.
     ocr_timeout_seconds: int = 90
+    # Bounds how many PaddleOCR engine instances are loaded process-wide, independent of
+    # worker_concurrency: all jobs' scanned pages are OCR'd through one shared pool of this
+    # size, not a new pool per job, so raising worker_concurrency doesn't multiply OCR
+    # memory usage. CPU-only PaddleOCR (see requirements.txt) - tune to the box's core count.
+    ocr_page_workers: int = 4
 
     log_level: str = "INFO"
     # When set, JSON logs are also written to this file path (in addition to stdout) - a

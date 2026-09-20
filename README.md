@@ -131,9 +131,7 @@ request either way, just with an `Authorization: Bearer` header attached when `O
 Install: copy the app to `/opt/invoice-service`, create a venv there, adjust the `User`/
 paths in each unit if needed, then:
 ```bash
-sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now invoice-api invoice-worker invoice-cleanup.timer invoice-pg-backup.timer
+sudo cp deploy/systemd/*.service deploy/systemd/*.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now invoice-api invoice-worker invoice-cleanup.timer invoice-pg-backup.timer
 ```
 
 `invoice-api.service` runs Uvicorn with `--workers 4` (tune to actual CPU core count) rather
@@ -213,6 +211,14 @@ What's still genuinely open:
   explicit `OCR_TIMEOUT_SECONDS` ceiling so a hung/pathological page fails cleanly instead of
   tying up a worker thread indefinitely. Not yet re-verified under sustained load at a
   raised `WORKER_CONCURRENCY`.
+- Scanned pages within one document now OCR concurrently on a shared pool sized by
+  `OCR_PAGE_WORKERS` (`app/pipeline/run.py`), rather than one at a time — each pool thread
+  still gets its own isolated OCR engine instance, same isolation principle as above. The
+  pool's internal queue is unbounded, so under heavy load a page can wait behind others
+  before it starts; `OCR_TIMEOUT_SECONDS` measures from submission, so a burst of traffic
+  can trip a page's timeout on queue wait rather than a genuinely hung page. That's an
+  accepted tradeoff — the job just fails cleanly and retries via the existing
+  `WORKER_MAX_RETRIES`/backoff, rather than needing separate handling here.
 - **No API authentication, no rate limiting, secrets in plaintext `.env`, no TLS** — still
   fully open. Required before exposing this beyond localhost.
 - One Postgres instance, no replication — see [Resilience](#resilience) above. Moving to a
