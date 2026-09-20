@@ -3,11 +3,10 @@ __pycache__/
 .venv/
 venv/
 .env
-.pytest_cache/
+.ruff_cache/
 *.egg-info/
-
-tests/golden/samples/*.pdf
-tests/golden/expected/*.json
+.DS_Store
+**/.DS_Store
 
 data/
 logs/

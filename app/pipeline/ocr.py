@@ -59,50 +59,7 @@ class PaddleOcrEngine(OcrEngine):
         return lines
 
 
-class TesseractOcrEngine(OcrEngine):
-    """Lighter fallback: easier to containerize, weaker on multilingual/table layouts."""
-
-    def __init__(self, lang: str = "eng"):
-        self.lang = lang
-        logger.info("ocr_engine_initialized", engine="tesseract", lang=lang)
-
-    def ocr_page_image(self, image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
-        import pytesseract
-        from PIL import Image
-
-        started = time.monotonic()
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        data = pytesseract.image_to_data(image, lang=self.lang, output_type=pytesseract.Output.DICT)
-
-        lines: list[ExtractedLine] = []
-        for i in range(len(data["text"])):
-            text = data["text"][i].strip()
-            if not text:
-                continue
-            try:
-                confidence = max(float(data["conf"][i]), 0.0) / 100.0
-            except (ValueError, TypeError):
-                confidence = 0.0
-            x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
-            lines.append(
-                ExtractedLine(page=page_number, text=text, bbox=(x, y, x + w, y + h), confidence=confidence)
-            )
-
-        avg_confidence = (sum(line.confidence for line in lines) / len(lines)) if lines else None
-        logger.info(
-            "ocr_page_complete",
-            engine="tesseract",
-            page=page_number,
-            line_count=len(lines),
-            avg_confidence=avg_confidence,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
-        return lines
-
-
 def get_ocr_engine(name: str = "paddle") -> OcrEngine:
     if name == "paddle":
         return PaddleOcrEngine()
-    if name == "tesseract":
-        return TesseractOcrEngine()
     raise ValueError(f"unknown OCR engine: {name}")

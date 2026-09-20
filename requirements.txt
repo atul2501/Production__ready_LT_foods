@@ -11,7 +11,6 @@ structlog==24.4.0
 PyMuPDF==1.24.10
 paddleocr==2.8.1
 paddlepaddle==2.6.2
-pytesseract==0.3.13
 Pillow==10.4.0
 numpy==1.26.4
 rapidfuzz==3.9.7

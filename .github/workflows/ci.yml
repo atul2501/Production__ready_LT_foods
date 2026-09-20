@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  unit-tests:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,33 +20,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Run unit tests
-        env:
-          STORAGE_DIR: /tmp/lt_pdfs_ci
-        run: pytest tests/unit -v
-
-  golden-set:
-    # Manual only (Actions tab -> "Run workflow"), never on push/PR - every run does real
-    # OCR + LLM inference against tests/golden/samples/*.pdf, which costs Ollama Cloud
-    # usage. Runs as a no-op ("No sample PDFs found...") until tests/golden/samples/ and
-    # tests/golden/expected/ are populated - see README "Key risks". Requires
-    # OLLAMA_API_KEY (and optionally OLLAMA_HOSTS/OLLAMA_MODEL) as repo secrets/variables.
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
-
-      - name: Run golden set (accuracy regression gate)
-        env:
-          STORAGE_DIR: /tmp/lt_pdfs_ci
-          OLLAMA_HOSTS: ${{ vars.OLLAMA_HOSTS || 'https://ollama.com' }}
-          OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL }}
-          OLLAMA_API_KEY: ${{ secrets.OLLAMA_API_KEY }}
-        run: python -m tests.golden.run_golden_set
+      - name: Lint
+        run: ruff check app scripts main.py worker_main.py

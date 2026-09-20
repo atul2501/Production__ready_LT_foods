@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://invoice:invoice@localhost:5432/invoices"
 
     ollama_hosts: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b-instruct"
+    ollama_model: str = "gemma4:31b"
     ollama_num_ctx: int = 16384
     ollama_timeout_seconds: int = 120
     # Set to use Ollama Cloud (https://ollama.com) instead of / alongside a self-hosted

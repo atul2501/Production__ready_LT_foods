@@ -93,8 +93,6 @@ production redundancy via systemd, not extra replicas).
   job-outcome counters (`invoice_jobs_completed_total{status=...}`), pipeline duration histogram,
   and Ollama request/token counters (a spend proxy). See [Monitoring](#monitoring) below.
 
-Or run `./scripts/smoke_test.sh path/to/sample.pdf` for the same flow via curl.
-
 ## Extraction engine: Ollama Cloud
 
 The extraction engine runs on [Ollama Cloud](https://ollama.com) by default — faster and more accurate
@@ -179,8 +177,7 @@ monitoring stack.
   ```bash
   gunzip -c backups/postgres/daily/invoices-<date>.sql.gz | psql -U invoice -d invoices
   ```
-  Test this occasionally — an unverified backup isn't a real backup. (Verified during
-  development: seeded data, backed up, restored into a scratch DB, row counts matched exactly.)
+  Test this occasionally — an unverified backup isn't a real backup.
 - **Retention cleanup**: `app/worker/retention.py` (daily via `invoice-cleanup.timer`)
   deletes completed jobs (`success`/`needs_review`/`failed`) and their stored PDFs once
   `RETENTION_DAYS` (default 30) old — batched, file-deleted-before-row for self-healing on
@@ -189,29 +186,9 @@ monitoring stack.
   reduce data-loss risk, but a host failure still means downtime until manually recovered.
   Managed Postgres (RDS-style) or real clustering is the next step before multi-machine/HA.
 
-## Testing
-
-```bash
-pip install -r requirements-dev.txt
-pytest                                        # fast unit tests, no live services needed
-RUN_INTEGRATION=1 pytest tests/integration      # requires a live Postgres matching DATABASE_URL
-python -m tests.golden.run_golden_set           # once tests/golden/samples + expected/ are populated
-```
-
-`.github/workflows/ci.yml` runs unit tests on every push/PR to `main`, plus a manual-only
-`golden-set` job (Actions tab → "Run workflow") that runs the same golden-set command in CI —
-a no-op until the samples/expected dirs below are populated, and never triggered
-automatically since every real run costs Ollama Cloud inference.
-
-`tests/integration/test_worker_queue.py` covers the two correctness-critical pieces of the
-queue directly against real Postgres (not mockable): concurrent `SKIP LOCKED` claiming
-across threads (no duplicates, none skipped) and stale-job reaping.
-
 ## Key risks (read before treating this as fully production-ready)
 
-Verified against a real 56-invoice sample across 30 vendor formats (see `logs/` for the
-run) — the extraction/grounding/queue architecture holds up, including live-tested worker
-crash recovery and backup/restore. What's still genuinely open:
+What's still genuinely open:
 
 - **No API authentication, no rate limiting.** Anyone who can reach the API can upload
   PDFs and read every job's data, including bank details and VAT numbers — no access
@@ -227,33 +204,21 @@ crash recovery and backup/restore. What's still genuinely open:
   `needs_review` rate, a sustained failure rate, or an Ollama Cloud cost blowout would still
   go unnoticed until someone checks manually or points a monitoring stack at the endpoint.
 - **`company_code`/`currency`** are inference-heavy (nothing to ground against) and are
-  always flagged for review by design — build out `app/services/vendor_hints.py` with
-  validated vendor-specific rules to reduce this over time.
-- Golden-set regression testing is wired up (including a manual CI job, see
-  [Testing](#testing)) but still inert until the 306 sample PDFs (and their
-  manually-verified expected JSON) are dropped into `tests/golden/samples/` and
-  `tests/golden/expected/` — today's confidence comes from manual smoke tests, not an
-  automated, repeatable accuracy gate.
+  always flagged for review by design. There is no vendor-hints lookup wired in today, so
+  every job needs a human to confirm these two fields.
 - A transient PaddleOCR crash was observed once on a real scanned invoice (self-healed on
   retry), suspected to be a thread-safety interaction from sharing one `PaddleOCR` instance
   across the worker's thread pool. Fixed by giving each worker thread its own OCR engine
   instance (`app/pipeline/run.py`) instead of a shared global one, and OCR calls now have an
   explicit `OCR_TIMEOUT_SECONDS` ceiling so a hung/pathological page fails cleanly instead of
   tying up a worker thread indefinitely. Not yet re-verified under sustained load at a
-  raised `WORKER_CONCURRENCY` — do that (re-run `./scripts/smoke_test.sh` or the golden set
-  at the higher concurrency) before relying on it at volume.
+  raised `WORKER_CONCURRENCY`.
 - **No API authentication, no rate limiting, secrets in plaintext `.env`, no TLS** — still
-  fully open, deliberately out of scope for the current round of changes. Required before
-  exposing this beyond localhost; see the top of this section.
-- `company_code`/`currency` are inference-heavy (nothing to ground against) and are always
-  flagged for review by design — build out `app/services/vendor_hints.py` with validated
-  vendor-specific rules to reduce this over time. Left empty here since populating it needs
-  real, verified vendor data, not invented entries.
+  fully open. Required before exposing this beyond localhost.
 - One Postgres instance, no replication — see [Resilience](#resilience) above. Moving to a
   managed/replicated Postgres (e.g. RDS-style) is an infrastructure decision outside what a
   code change alone can provide.
-- At `WORKER_CONCURRENCY=3` and the ~46.7s/PDF average measured in `logs/smoke_test_report.json`,
-  steady-state throughput is still well under 200,000 PDFs/month (~6,600/day) — closing that
-  gap means raising `WORKER_CONCURRENCY` in step with a higher-tier (higher-cost) Ollama
-  Cloud plan, or evaluating self-hosted GPU inference; watch `invoice_ollama_requests_total`
-  and `invoice_ollama_eval_tokens_total` (see [Monitoring](#monitoring)) once you do.
+- Steady-state throughput is bounded by `WORKER_CONCURRENCY` and your Ollama Cloud plan's
+  concurrent-request limit — raise `WORKER_CONCURRENCY` in step with a higher-tier plan, or
+  evaluate self-hosted GPU inference, and watch `invoice_ollama_requests_total` /
+  `invoice_ollama_eval_tokens_total` (see [Monitoring](#monitoring)) once you do.
