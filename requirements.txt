@@ -9,10 +9,6 @@ alembic==1.13.3
 httpx==0.27.2
 structlog==24.4.0
 PyMuPDF==1.24.10
-# paddlepaddle imports setuptools directly (paddle/utils/cpp_extension/cpp_extension.py)
-# without declaring it as a dependency - Python 3.12's venv no longer bundles setuptools by
-# default, so it must be pinned here explicitly or PaddleOCR import fails at OCR time with
-# "ModuleNotFoundError: No module named 'setuptools'".
 setuptools==75.1.0
 paddleocr==2.8.1
 paddlepaddle==2.6.2
@@ -20,3 +16,4 @@ Pillow==10.4.0
 numpy==1.26.4
 rapidfuzz==3.9.7
 prometheus-client==0.21.0
+#winget install --id PostgreSQL.PostgreSQL.16 -e --accept-package-agreements --accept-source-agreements
