@@ -39,12 +39,15 @@ def _check_backlog(db: Session) -> None:
         )
 
 
-def _persist_upload(db: Session, content: bytes, filename: str | None) -> models.Job:
+def _persist_upload(
+    db: Session, content: bytes, filename: str | None, uploaded_by: str | None = None
+) -> models.Job:
     """Synchronous body of the upload handler - backlog check, SHA-256 hashing, the disk
     write, and every DB call (the sync SQLAlchemy/psycopg2 driver blocks). Run via
     run_in_threadpool below rather than directly in the async route, so one slow/large
     upload can't stall every other request the single Uvicorn event loop is serving
-    concurrently."""
+    concurrently. Also called directly (no HTTP hop) by app/email_ingest/ for PDFs pulled
+    off an inbox, which is where uploaded_by (the sender address) comes from."""
     _check_backlog(db)
 
     job_id = str(uuid.uuid4())
@@ -60,6 +63,7 @@ def _persist_upload(db: Session, content: bytes, filename: str | None) -> models
         original_filename=filename,
         storage_key=storage_key,
         status=models.JobStatusEnum.queued,
+        uploaded_by=uploaded_by,
     )
     db.add(job)
     db.add(models.AuditEvent(job_id=job_id, event_type="uploaded", event_metadata={"file_hash": file_hash}))

@@ -93,6 +93,19 @@ class AuditEvent(Base):
     job = relationship("Job", back_populates="audit_events")
 
 
+class ProcessedEmail(Base):
+    """One row per inbox message app/email_ingest/ has already turned into Job(s) -
+    dedup key is the email's Message-ID, not a Job, since one email can carry several PDF
+    attachments (several Jobs). Checked before creating Jobs so a crash between persisting
+    and flagging the message Seen can't cause it to be re-ingested on the next poll."""
+
+    __tablename__ = "processed_emails"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    message_id = Column(String, nullable=False, unique=True, index=True)
+    processed_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+
+
 class ValidationFlag(Base):
     __tablename__ = "validation_flags"
 

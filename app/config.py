@@ -55,6 +55,22 @@ class Settings(BaseSettings):
     # memory usage. CPU-only PaddleOCR (see requirements.txt) - tune to the box's core count.
     ocr_page_workers: int = 4
 
+    # Email ingestion (IMAP) - app/email_ingest/, run as its own service (email_ingest_main.py)
+    # rather than folded into the worker. Any unread message with a PDF attachment is fed
+    # into the same Job pipeline as a manual upload; imap_username/password is a mailbox
+    # login (an app password for providers that require one, e.g. Gmail/Yahoo with 2FA).
+    imap_host: str = ""
+    imap_port: int = 993
+    imap_use_ssl: bool = True
+    imap_username: str = ""
+    imap_password: str = ""
+    imap_folder: str = "INBOX"
+    # If set, a fully-ingested message is moved here instead of just being flagged Seen -
+    # gives an audit trail of what the ingester actually consumed. Leave unset to just mark
+    # Seen and leave the message where it is.
+    imap_processed_folder: str | None = None
+    imap_poll_interval_seconds: float = 60.0
+
     log_level: str = "INFO"
     # When set, JSON logs are also written to this file path (in addition to stdout) - a
     # real filesystem path now that everything runs natively, no volume indirection needed.
