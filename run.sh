@@ -24,6 +24,7 @@ RUN_DIR=.run
 LOG_DIR=logs
 RUN_LOG="$LOG_DIR/run.log"
 MAIN_PID_FILE="$RUN_DIR/main.pid"
+RUN_ID_FILE="$RUN_DIR/run.id"
 STOP_FLAG="$RUN_DIR/stopping"
 SERVICES=(api worker email)
 # A service that stayed up at least this long is considered healthy again, so its restart
@@ -35,10 +36,21 @@ MAX_RESTART_DELAY=60
 # force-killed. Safe either way - a killed job's lease is reclaimed and the job retried.
 STOP_GRACE_SECONDS=30
 
+# IS_WINDOWS: the services are native Windows processes - either run from Git Bash/MSYS2,
+# or from WSL using this project's Windows venv (.venv/Scripts/python.exe). Both need the
+# Windows process handling below; plain `kill` can't reliably stop those processes.
+IS_WINDOWS=0
+IS_WSL=0
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
-  *) IS_WINDOWS=0 ;;
+  Linux)
+    if grep -qi microsoft /proc/version 2>/dev/null && [ -f .venv/Scripts/python.exe ] && [ ! -x .venv/bin/python ]; then
+      IS_WINDOWS=1
+      IS_WSL=1
+    fi
+    ;;
 esac
+if (( IS_WSL )); then ENV_KIND=wsl; elif (( IS_WINDOWS )); then ENV_KIND=msys; else ENV_KIND=linux; fi
 
 # Always appended to run.log; also echoed when a person is watching (a terminal), but not
 # in the background process, whose stdout already *is* run.log - that would double lines.
@@ -68,15 +80,21 @@ service_pattern() {
 
 # --- Windows process handling -------------------------------------------------------
 # On Windows the services are native processes (.venv\Scripts\python.exe is a launcher
-# that starts the real C:\PythonXY\python.exe as its child). MSYS/Git Bash `kill` does not
-# reliably terminate those, and MSYS pids differ between Git Bash and MSYS2 terminals - so
+# that starts the real C:\PythonXY\python.exe as its child). MSYS/Git Bash/WSL `kill`
+# does not reliably terminate those, and pids differ between Git Bash, MSYS2 and WSL - so
 # instead of trusting pid files, services are found by what they actually are: this
 # project's venv python running one of the three service commands. That is also what
-# catches copies left behind by an earlier crashed or killed run.
+# catches copies left behind by an earlier crashed or killed run, whichever terminal
+# started it.
+
+win_path() {
+  if (( IS_WSL )); then wslpath -w "$1"; else cygpath -w "$1"; fi
+}
 
 # Prints "<windows pid> <service>" for every running service launcher of this project.
 win_service_pids() {
-  VENV_PY="$(cygpath -w "$PWD/.venv/Scripts/python.exe")" \
+  # WSLENV passes VENV_PY through to powershell.exe when run from WSL; ignored elsewhere.
+  VENV_PY="$(win_path "$PWD/.venv/Scripts/python.exe")" WSLENV="VENV_PY${WSLENV:+:$WSLENV}" \
     powershell.exe -NoProfile -NonInteractive -Command '
       Get-CimInstance Win32_Process |
         Where-Object { $_.ExecutablePath -eq $env:VENV_PY } |
@@ -85,16 +103,23 @@ win_service_pids() {
           if ($c -like "*uvicorn main:app*") { "$($_.ProcessId) api" }
           elseif ($c -like "*worker_main.py*") { "$($_.ProcessId) worker" }
           elseif ($c -like "*email_ingest_main.py*") { "$($_.ProcessId) email" }
-        }' 2>/dev/null | tr -d '\r'
+        }' </dev/null 2>/dev/null | tr -d '\r'
 }
 
 # Kills a Windows process and all of its children (the launcher + the real python).
+# </dev/null: taskkill reads stdin, and inside a `while read ... done < <(list)` loop it
+# would otherwise swallow the rest of the list, leaving every later service running.
 win_kill_tree() {
-  taskkill //F //T //PID "$1" >/dev/null 2>&1
+  if (( IS_WSL )); then
+    taskkill.exe /F /T /PID "$1" </dev/null >/dev/null 2>&1
+  else
+    taskkill //F //T //PID "$1" </dev/null >/dev/null 2>&1   # // stops MSYS turning /F into a path
+  fi
 }
 
+# Windows pid of an MSYS/Git Bash process (not available under WSL).
 win_winpid() {
-  cat "/proc/$1/winpid" 2>/dev/null
+  (( IS_WSL )) || cat "/proc/$1/winpid" 2>/dev/null
 }
 # -------------------------------------------------------------------------------------
 
@@ -104,7 +129,7 @@ win_winpid() {
 # is never lost.
 run_service() {
   case "$1" in
-    api)    exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$PORT" >/dev/null 2>>"$RUN_LOG" ;;
+    api)    exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$PORT" --no-use-colors >/dev/null 2>>"$RUN_LOG" ;;
     worker) exec "$PY" worker_main.py >/dev/null 2>>"$RUN_LOG" ;;
     email)  exec "$PY" email_ingest_main.py >/dev/null 2>>"$RUN_LOG" ;;
   esac
@@ -164,7 +189,7 @@ supervise() {
   local name=$1
   local delay=$MIN_RESTART_DELAY
 
-  while [ ! -f "$STOP_FLAG" ]; do
+  while is_current_run; do
     local started=$SECONDS
     run_service "$name" &
     local child=$!
@@ -174,7 +199,7 @@ supervise() {
     local code=0
     wait "$child" || code=$?
     rm -f "$RUN_DIR/$name.pid"
-    [ -f "$STOP_FLAG" ] && break
+    is_current_run || break
 
     if (( SECONDS - started >= HEALTHY_AFTER_SECONDS )); then
       delay=$MIN_RESTART_DELAY
@@ -185,23 +210,34 @@ supervise() {
   done
 }
 
+# A supervisor keeps restarting its service only while its own run is the current one.
+# Checked after every wait/sleep, so a supervisor that outlived a stop (e.g. one asleep in
+# its backoff, or from a run started in a different terminal that `stop` couldn't reach)
+# exits on its next wake-up instead of starting a duplicate service.
+is_current_run() {
+  [ ! -f "$STOP_FLAG" ] && [ "$(cat "$RUN_ID_FILE" 2>/dev/null)" = "$RUN_ID" ]
+}
+
 # Stops supervisors first (so nothing gets restarted), then the services themselves.
 stop_services() {
   touch "$STOP_FLAG"
 
-  local name pid
-  for name in "${SERVICES[@]}"; do
-    pid=$(read_pid "$RUN_DIR/$name.supervisor.pid")
-    is_alive "$pid" && kill "$pid" 2>/dev/null
-  done
-
   if (( IS_WINDOWS )); then
+    # Supervisors aren't killed by pid here (pid files may come from another shell's
+    # numbering, see own_main_pid) - the stop flag / cleared run id makes each one exit
+    # as soon as its service below is gone.
     local winpid _
     while read -r winpid _; do
       [ -n "$winpid" ] && win_kill_tree "$winpid"
     done < <(win_service_pids)
     return
   fi
+
+  local name pid
+  for name in "${SERVICES[@]}"; do
+    pid=$(read_pid "$RUN_DIR/$name.supervisor.pid")
+    is_alive "$pid" && kill "$pid" 2>/dev/null
+  done
 
   local pids=()
   for name in "${SERVICES[@]}"; do
@@ -268,22 +304,40 @@ status() {
   (( any ))
 }
 
+# The background process's pid, but only if it was started from this same kind of shell -
+# pids from Git Bash, MSYS2 and WSL are separate numbering spaces, so a pid written by one
+# could name an unrelated process in another.
+own_main_pid() {
+  local pid kind
+  [ -f "$MAIN_PID_FILE" ] || return 0
+  read -r pid kind < "$MAIN_PID_FILE"
+  [ "$kind" = "$ENV_KIND" ] && echo "$pid"
+}
+
 is_running() {
-  is_alive "$(read_pid "$MAIN_PID_FILE")" && return 0
   if (( IS_WINDOWS )); then
-    [ -n "$(win_service_pids)" ] && return 0
+    # The real service processes are the only reliable signal on Windows (see above).
+    [ -n "$(win_service_pids)" ]
+    return
   fi
+  is_alive "$(own_main_pid)" && return 0
   local name
   for name in "${SERVICES[@]}"; do
-    is_alive "$(read_pid "$RUN_DIR/$name.supervisor.pid")" && return 0
+    is_alive "$(read_pid "$RUN_DIR/$name.pid")" && return 0
   done
   return 1
 }
 
+clear_run_state() {
+  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$RUN_ID_FILE" "$STOP_FLAG"
+}
+
 # The background process: supervises the three services until told to stop.
 daemon() {
-  echo $$ > "$MAIN_PID_FILE"
+  echo "$$ $ENV_KIND" > "$MAIN_PID_FILE"
   (( IS_WINDOWS )) && win_winpid $$ > "$RUN_DIR/main.winpid"
+  RUN_ID="$$-$ENV_KIND-$(date +%s)"
+  echo "$RUN_ID" > "$RUN_ID_FILE"
   find_venv_python
   ensure_app_log_file
 
@@ -291,7 +345,7 @@ daemon() {
     trap - INT TERM HUP
     log "shutdown requested - stopping all services"
     stop_services
-    rm -f "$RUN_DIR"/*.pid "$STOP_FLAG"
+    clear_run_state
     log "all services stopped"
     exit 0
   }
@@ -304,22 +358,41 @@ daemon() {
   done
   log "all services running - API: http://localhost:$PORT/docs"
 
-  # Supervisors never exit on their own; this keeps the daemon alive until a stop signal.
+  # Keeps the daemon alive while its supervisors run; exits once this run is no longer
+  # current (stopped, or replaced by a newer run) and its supervisors have exited.
   # Looping because `wait` returns early whenever a trap fires.
-  while true; do
+  while is_current_run; do
     wait
     sleep 1
   done
+  wait
 }
 
 start() {
+  # From WSL, the services would be Windows processes owned through WSL's interop bridge,
+  # which WSL tears down when the terminal/session that started them closes - leaving the
+  # supervisors unable to track them (and restarting duplicates). Git Bash runs them as
+  # plain Windows processes instead, so hand the start over to it. (This also covers an
+  # MSYS2 terminal whose `bash` resolves to WSL's C:\Windows\System32\bash.exe.)
+  if (( IS_WSL )); then
+    local gitbash="/mnt/c/Program Files/Git/bin/bash.exe"
+    if [ ! -x "$gitbash" ]; then
+      echo "Running under WSL, but the services must be started from Git Bash on Windows" >&2
+      echo "(Git for Windows not found at C:\\Program Files\\Git). Start it from a Git Bash terminal." >&2
+      return 1
+    fi
+    echo "(WSL detected - starting via Git Bash so the services don't depend on this WSL session)"
+    PORT="$PORT" WSLENV="PORT${WSLENV:+:$WSLENV}" "$gitbash" ./run.sh start
+    return
+  fi
+
   if is_running; then
     echo "Already running:"
     status
     echo "Use './run.sh restart' to restart or './run.sh stop' to stop."
     return 1
   fi
-  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+  clear_run_state
 
   # Done here in the foreground so a broken venv, busy port or database shows up
   # immediately in the terminal instead of only inside a log file.
@@ -348,21 +421,22 @@ start() {
 stop() {
   if ! is_running; then
     echo "Not running."
-    rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+    clear_run_state
     return 0
   fi
   echo "Stopping..."
   log "stop requested"
 
   local main_pid
-  main_pid=$(read_pid "$MAIN_PID_FILE")
+  main_pid=$(own_main_pid)
   if (( IS_WINDOWS )); then
-    # Take down the background process first so nothing restarts what's stopped next.
+    # Invalidate the run first: every supervisor of it - including one this shell can't
+    # see, e.g. started from WSL vs Git Bash - exits instead of restarting what's killed next.
     touch "$STOP_FLAG"
-    local main_winpid
-    main_winpid=$(read_pid "$RUN_DIR/main.winpid")
+    rm -f "$RUN_ID_FILE"
+    local main_winpid=""
+    [ -n "$main_pid" ] && main_winpid=$(read_pid "$RUN_DIR/main.winpid")
     [ -n "$main_winpid" ] && win_kill_tree "$main_winpid"
-    is_alive "$main_pid" && kill -9 "$main_pid" 2>/dev/null
   elif is_alive "$main_pid"; then
     kill -TERM "$main_pid" 2>/dev/null
     local waited=0
@@ -374,7 +448,7 @@ stop() {
   # Also catches services left behind by an earlier run that died without cleaning up.
   stop_services
   is_alive "$main_pid" && kill -9 "$main_pid" 2>/dev/null
-  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+  clear_run_state
   log "all services stopped"
 
   if (( IS_WINDOWS )) && [ -n "$(win_service_pids)" ]; then
@@ -393,8 +467,8 @@ case "${1:-start}" in
   stop)     stop ;;
   restart)  stop && start ;;
   status)
-    if is_running; then echo "Running:"; else echo "Not running:"; fi
-    status
+    if out=$(status); then echo "Running:"; else echo "Not running:"; fi
+    echo "$out"
     ;;
   logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app.log" ;;
   __daemon) daemon ;;
