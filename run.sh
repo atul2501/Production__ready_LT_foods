@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Runs the whole service - API + worker + email ingester - and keeps it running: any
-# service that crashes or exits is restarted automatically (with backoff), so one bad
-# moment (Gmail dropping the connection, Postgres restarting, OOM) doesn't leave the
-# system half-down. Works in Git Bash on Windows and on Linux/EC2.
+# Runs the whole service - API + worker + email ingester - in the background and keeps it
+# running: any service that crashes or exits is restarted automatically (with backoff), so
+# one bad moment (Gmail dropping the connection, Postgres restarting, OOM) doesn't leave
+# the system half-down. Works in Git Bash / MSYS2 on Windows and on Linux/EC2.
 #
-#   ./run.sh            start everything in the foreground (Ctrl+C stops all)
-#   ./run.sh stop       stop a running instance (e.g. from another terminal)
+#   ./run.sh            start everything in the background (returns immediately)
+#   ./run.sh stop       stop everything
+#   ./run.sh restart    stop, then start
 #   ./run.sh status     show what's running
-#   PORT=9000 ./run.sh  API on a different port (default 8000)
+#   ./run.sh logs       follow logs/run.log + logs/app.log (Ctrl+C stops following only)
+#   PORT=9000 ./run.sh  API on a different port (default 8001)
+#
+# Logs:
+#   logs/app.log  - everything the app does (JSON, one line per event) - LOG_FILE in .env
+#   logs/run.log  - service starts/stops/crashes/restarts, plus any error output a service
+#                   prints outside the app log (crash tracebacks, uvicorn startup errors)
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -16,6 +23,7 @@ PORT="${PORT:-8001}"
 RUN_DIR=.run
 LOG_DIR=logs
 RUN_LOG="$LOG_DIR/run.log"
+MAIN_PID_FILE="$RUN_DIR/main.pid"
 STOP_FLAG="$RUN_DIR/stopping"
 SERVICES=(api worker email)
 # A service that stayed up at least this long is considered healthy again, so its restart
@@ -23,14 +31,22 @@ SERVICES=(api worker email)
 HEALTHY_AFTER_SECONDS=60
 MIN_RESTART_DELAY=2
 MAX_RESTART_DELAY=60
-# The worker finishes its in-flight jobs on SIGTERM; after this long it is force-killed.
-# Safe either way - a killed job's lease is reclaimed by the reaper and retried.
+# Linux only: the worker finishes its in-flight jobs on SIGTERM; after this long it is
+# force-killed. Safe either way - a killed job's lease is reclaimed and the job retried.
 STOP_GRACE_SECONDS=30
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+  *) IS_WINDOWS=0 ;;
+esac
+
+# Always appended to run.log; also echoed when a person is watching (a terminal), but not
+# in the background process, whose stdout already *is* run.log - that would double lines.
 log() {
   local line="$(date '+%Y-%m-%d %H:%M:%S') [run.sh] $*"
-  echo "$line"
   echo "$line" >> "$RUN_LOG"
+  [ -t 1 ] && echo "$line"
+  return 0
 }
 
 is_alive() {
@@ -41,13 +57,56 @@ read_pid() {
   [ -f "$1" ] && cat "$1" 2>/dev/null
 }
 
-# Run in a background subshell; exec makes the service itself the process behind $!, so
-# the pid file and signals point at python, not at an intermediate shell.
+# Command-line pattern identifying each service's process (used on Windows, see below).
+service_pattern() {
+  case "$1" in
+    api)    echo "uvicorn main:app" ;;
+    worker) echo "worker_main.py" ;;
+    email)  echo "email_ingest_main.py" ;;
+  esac
+}
+
+# --- Windows process handling -------------------------------------------------------
+# On Windows the services are native processes (.venv\Scripts\python.exe is a launcher
+# that starts the real C:\PythonXY\python.exe as its child). MSYS/Git Bash `kill` does not
+# reliably terminate those, and MSYS pids differ between Git Bash and MSYS2 terminals - so
+# instead of trusting pid files, services are found by what they actually are: this
+# project's venv python running one of the three service commands. That is also what
+# catches copies left behind by an earlier crashed or killed run.
+
+# Prints "<windows pid> <service>" for every running service launcher of this project.
+win_service_pids() {
+  VENV_PY="$(cygpath -w "$PWD/.venv/Scripts/python.exe")" \
+    powershell.exe -NoProfile -NonInteractive -Command '
+      Get-CimInstance Win32_Process |
+        Where-Object { $_.ExecutablePath -eq $env:VENV_PY } |
+        ForEach-Object {
+          $c = $_.CommandLine
+          if ($c -like "*uvicorn main:app*") { "$($_.ProcessId) api" }
+          elseif ($c -like "*worker_main.py*") { "$($_.ProcessId) worker" }
+          elseif ($c -like "*email_ingest_main.py*") { "$($_.ProcessId) email" }
+        }' 2>/dev/null | tr -d '\r'
+}
+
+# Kills a Windows process and all of its children (the launcher + the real python).
+win_kill_tree() {
+  taskkill //F //T //PID "$1" >/dev/null 2>&1
+}
+
+win_winpid() {
+  cat "/proc/$1/winpid" 2>/dev/null
+}
+# -------------------------------------------------------------------------------------
+
+# Run in a background subshell; exec makes the service itself the process behind $!.
+# stdout is dropped because it's the same JSON the app already writes to LOG_FILE
+# (logs/app.log); stderr goes to run.log so a crash traceback or a uvicorn startup error
+# is never lost.
 run_service() {
   case "$1" in
-    api)    exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$PORT" ;;
-    worker) exec "$PY" worker_main.py ;;
-    email)  exec "$PY" email_ingest_main.py ;;
+    api)    exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$PORT" >/dev/null 2>>"$RUN_LOG" ;;
+    worker) exec "$PY" worker_main.py >/dev/null 2>>"$RUN_LOG" ;;
+    email)  exec "$PY" email_ingest_main.py >/dev/null 2>>"$RUN_LOG" ;;
   esac
 }
 
@@ -67,6 +126,35 @@ find_venv_python() {
     echo "Dependencies missing in .venv - run: $PY -m pip install -r requirements.txt" >&2
     exit 1
   fi
+}
+
+# Service stdout is discarded (see run_service), so the app log file is the only record
+# of what the app does - make sure there is one even if .env doesn't set LOG_FILE. Only
+# set when .env lacks it: a real env var would override the .env value.
+ensure_app_log_file() {
+  if ! grep -qE '^[[:space:]]*LOG_FILE=' .env 2>/dev/null; then
+    export LOG_FILE="$LOG_DIR/app.log"
+  fi
+}
+
+port_is_free() {
+  "$PY" -c "import socket, sys; socket.socket().bind(('0.0.0.0', int(sys.argv[1])))" "$PORT" 2>/dev/null
+}
+
+run_migrations() {
+  log "applying database migrations"
+  # Retried rather than fatal: on a server reboot Postgres may still be starting up.
+  # Bounded so a real config error (wrong DATABASE_URL/password) fails loudly.
+  local attempts=24 attempt=1   # x 5s = 2 minutes
+  until "$PY" -m alembic upgrade head; do
+    if (( attempt >= attempts )); then
+      log "migrations still failing after $attempts attempts - check Postgres is running and DATABASE_URL in .env"
+      return 1
+    fi
+    log "migrations failed (attempt $attempt/$attempts) - retrying in 5s"
+    attempt=$(( attempt + 1 ))
+    sleep 5
+  done
 }
 
 # Runs one service forever: start it, wait for it to exit, restart it after a delay that
@@ -97,15 +185,23 @@ supervise() {
   done
 }
 
-stop_all() {
-  mkdir -p "$RUN_DIR"
-  touch "$STOP_FLAG"   # tells every supervisor loop not to restart what we're about to stop
+# Stops supervisors first (so nothing gets restarted), then the services themselves.
+stop_services() {
+  touch "$STOP_FLAG"
 
   local name pid
   for name in "${SERVICES[@]}"; do
     pid=$(read_pid "$RUN_DIR/$name.supervisor.pid")
     is_alive "$pid" && kill "$pid" 2>/dev/null
   done
+
+  if (( IS_WINDOWS )); then
+    local winpid _
+    while read -r winpid _; do
+      [ -n "$winpid" ] && win_kill_tree "$winpid"
+    done < <(win_service_pids)
+    return
+  fi
 
   local pids=()
   for name in "${SERVICES[@]}"; do
@@ -132,98 +228,178 @@ stop_all() {
       kill -9 "$pid" 2>/dev/null
     fi
   done
-
-  rm -f "$RUN_DIR"/*.pid "$STOP_FLAG"
 }
 
+# Prints one "  <service>: running (...)" / "not running" line per service. Returns 0 if
+# anything at all is running (including leftovers), 1 if nothing is.
 status() {
-  local name pid running=0
-  for name in "${SERVICES[@]}"; do
-    pid=$(read_pid "$RUN_DIR/$name.pid")
-    if is_alive "$pid"; then
-      echo "$name: running (pid $pid)"
-      running=1
-    else
-      echo "$name: not running"
-    fi
-  done
-  return $(( running ? 0 : 1 ))
+  local name any=0
+  if (( IS_WINDOWS )); then
+    local found
+    found=$(win_service_pids)
+    for name in "${SERVICES[@]}"; do
+      local pids
+      pids=$(awk -v s="$name" '$2 == s { printf "%s%s", sep, $1; sep = ", " }' <<< "$found")
+      if [ -n "$pids" ]; then
+        local count
+        count=$(awk -v s="$name" '$2 == s' <<< "$found" | wc -l)
+        if (( count > 1 )); then
+          echo "  $name: running $count COPIES (windows pids $pids) - run './run.sh stop'"
+        else
+          echo "  $name: running (windows pid $pids)"
+        fi
+        any=1
+      else
+        echo "  $name: not running"
+      fi
+    done
+  else
+    local pid
+    for name in "${SERVICES[@]}"; do
+      pid=$(read_pid "$RUN_DIR/$name.pid")
+      if is_alive "$pid"; then
+        echo "  $name: running (pid $pid)"
+        any=1
+      else
+        echo "  $name: not running"
+      fi
+    done
+  fi
+  (( any ))
 }
 
-already_running() {
-  local name pid
+is_running() {
+  is_alive "$(read_pid "$MAIN_PID_FILE")" && return 0
+  if (( IS_WINDOWS )); then
+    [ -n "$(win_service_pids)" ] && return 0
+  fi
+  local name
   for name in "${SERVICES[@]}"; do
-    pid=$(read_pid "$RUN_DIR/$name.supervisor.pid")
-    is_alive "$pid" && return 0
+    is_alive "$(read_pid "$RUN_DIR/$name.supervisor.pid")" && return 0
   done
   return 1
 }
 
-mkdir -p "$RUN_DIR" "$LOG_DIR" data/pdfs
+# The background process: supervises the three services until told to stop.
+daemon() {
+  echo $$ > "$MAIN_PID_FILE"
+  (( IS_WINDOWS )) && win_winpid $$ > "$RUN_DIR/main.winpid"
+  find_venv_python
+  ensure_app_log_file
 
-case "${1:-start}" in
-  stop)
-    log "stop requested"
-    stop_all
+  on_signal() {
+    trap - INT TERM HUP
+    log "shutdown requested - stopping all services"
+    stop_services
+    rm -f "$RUN_DIR"/*.pid "$STOP_FLAG"
     log "all services stopped"
     exit 0
-    ;;
-  status)
+  }
+  trap on_signal INT TERM HUP
+
+  local name
+  for name in "${SERVICES[@]}"; do
+    supervise "$name" &
+    echo $! > "$RUN_DIR/$name.supervisor.pid"
+  done
+  log "all services running - API: http://localhost:$PORT/docs"
+
+  # Supervisors never exit on their own; this keeps the daemon alive until a stop signal.
+  # Looping because `wait` returns early whenever a trap fires.
+  while true; do
+    wait
+    sleep 1
+  done
+}
+
+start() {
+  if is_running; then
+    echo "Already running:"
     status
-    exit $?
+    echo "Use './run.sh restart' to restart or './run.sh stop' to stop."
+    return 1
+  fi
+  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+
+  # Done here in the foreground so a broken venv, busy port or database shows up
+  # immediately in the terminal instead of only inside a log file.
+  find_venv_python
+  if ! port_is_free; then
+    echo "Port $PORT is already in use by another program - stop it, or start on another port: PORT=9000 ./run.sh" >&2
+    return 1
+  fi
+  run_migrations || return 1
+
+  log "starting in background"
+  nohup "$0" __daemon >> "$RUN_LOG" 2>&1 < /dev/null &
+  disown
+
+  # Give the services a moment so status reflects reality (and an instant crash shows up).
+  sleep 5
+  echo
+  status || true
+  echo
+  echo "Running in the background. API: http://localhost:$PORT/docs"
+  echo "Logs:   logs/app.log (app)   logs/run.log (starts/stops/crashes)"
+  echo "        ./run.sh logs     to follow both"
+  echo "Stop:   ./run.sh stop"
+}
+
+stop() {
+  if ! is_running; then
+    echo "Not running."
+    rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+    return 0
+  fi
+  echo "Stopping..."
+  log "stop requested"
+
+  local main_pid
+  main_pid=$(read_pid "$MAIN_PID_FILE")
+  if (( IS_WINDOWS )); then
+    # Take down the background process first so nothing restarts what's stopped next.
+    touch "$STOP_FLAG"
+    local main_winpid
+    main_winpid=$(read_pid "$RUN_DIR/main.winpid")
+    [ -n "$main_winpid" ] && win_kill_tree "$main_winpid"
+    is_alive "$main_pid" && kill -9 "$main_pid" 2>/dev/null
+  elif is_alive "$main_pid"; then
+    kill -TERM "$main_pid" 2>/dev/null
+    local waited=0
+    while is_alive "$main_pid" && (( waited < STOP_GRACE_SECONDS + 10 )); do
+      sleep 1
+      waited=$(( waited + 1 ))
+    done
+  fi
+  # Also catches services left behind by an earlier run that died without cleaning up.
+  stop_services
+  is_alive "$main_pid" && kill -9 "$main_pid" 2>/dev/null
+  rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$STOP_FLAG"
+  log "all services stopped"
+
+  if (( IS_WINDOWS )) && [ -n "$(win_service_pids)" ]; then
+    echo "Some services could not be stopped:" >&2
+    status >&2
+    return 1
+  fi
+  echo "Stopped."
+}
+
+mkdir -p "$RUN_DIR" "$LOG_DIR" data/pdfs
+touch "$RUN_LOG"
+
+case "${1:-start}" in
+  start)    start ;;
+  stop)     stop ;;
+  restart)  stop && start ;;
+  status)
+    if is_running; then echo "Running:"; else echo "Not running:"; fi
+    status
     ;;
-  start)
-    ;;
+  logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app.log" ;;
+  __daemon) daemon ;;
   *)
-    echo "usage: $0 [start|stop|status]" >&2
+    echo "usage: $0 [start|stop|restart|status|logs]" >&2
     exit 2
     ;;
 esac
-
-# Refuse to start a second copy - two email ingesters polling the same Gmail inbox is
-# what got connections dropped before (see logs: "EOF occurred in violation of protocol").
-if already_running; then
-  echo "Already running - use './run.sh status' or './run.sh stop'." >&2
-  exit 1
-fi
-rm -f "$RUN_DIR"/*.pid "$STOP_FLAG"
-
-find_venv_python
-
-log "applying database migrations"
-# Retried rather than fatal: on a server reboot Postgres may still be starting up. Bounded
-# so a real config error (wrong DATABASE_URL/password) fails loudly instead of looping forever.
-MIGRATION_ATTEMPTS=24   # x 5s = 2 minutes
-attempt=1
-until "$PY" -m alembic upgrade head; do
-  if (( attempt >= MIGRATION_ATTEMPTS )); then
-    log "migrations still failing after $MIGRATION_ATTEMPTS attempts - check Postgres is running and DATABASE_URL in .env"
-    exit 1
-  fi
-  log "migrations failed (attempt $attempt/$MIGRATION_ATTEMPTS) - retrying in 5s"
-  attempt=$(( attempt + 1 ))
-  sleep 5
-done
-
-on_signal() {
-  trap - INT TERM
-  log "shutdown requested - stopping all services"
-  stop_all
-  log "all services stopped"
-  exit 0
-}
-trap on_signal INT TERM
-
-for name in "${SERVICES[@]}"; do
-  supervise "$name" &
-  echo $! > "$RUN_DIR/$name.supervisor.pid"
-done
-
-log "all services running - API: http://localhost:$PORT/docs  (Ctrl+C or './run.sh stop' to stop)"
-
-# Supervisors never exit on their own; this just keeps the script in the foreground until
-# a stop signal arrives. Looping because `wait` returns early whenever a trap fires.
-while true; do
-  wait
-  sleep 1
-done
