@@ -43,12 +43,17 @@ def _get_ocr_executor() -> concurrent.futures.ThreadPoolExecutor:
 # model per pool thread, bounded by ocr_page_workers) for genuine isolation, which is what
 # actually lets pages be OCR'd concurrently - both within one job and across jobs - safely.
 _thread_local = threading.local()
+# Engine construction is serialized: on a fresh install PaddleOCR downloads its model files
+# on first init, and several pool threads doing that at once collided on the same .tar
+# (WinError 32 on Windows). Only construction is locked - OCR calls still run concurrently.
+_ocr_engine_init_lock = threading.Lock()
 
 
 def _get_ocr_engine():
     engine = getattr(_thread_local, "ocr_engine", None)
     if engine is None:
-        engine = get_ocr_engine("paddle")
+        with _ocr_engine_init_lock:
+            engine = get_ocr_engine("paddle")
         _thread_local.ocr_engine = engine
     return engine
 

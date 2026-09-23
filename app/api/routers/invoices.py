@@ -125,6 +125,25 @@ async def upload_invoice(request: Request, db: Session = Depends(get_db)) -> Job
     return JobCreatedResponse(job_id=job.id, status=JobStatus.QUEUED, created_at=job.created_at)
 
 
+@router.get("/jobs/by-name/{filename:path}", response_model=JobResultResponse)
+def get_job_result_by_filename(filename: str, db: Session = Depends(get_db)) -> JobResultResponse:
+    """Extracted data for the most recent job whose uploaded/emailed PDF had this exact
+    filename (e.g. /api/v1/jobs/by-name/INV-123.pdf). Same response and same 409/422
+    semantics as /jobs/{job_id}/result. Declared before /jobs/{job_id} so "by-name" is never
+    parsed as a job id."""
+    logger.debug("job_result_by_filename_requested", filename=filename)
+    job = db.scalar(
+        select(models.Job)
+        .where(models.Job.original_filename == filename)
+        .order_by(models.Job.created_at.desc())
+        .limit(1)
+    )
+    if job is None:
+        logger.warning("job_result_by_filename_not_found", filename=filename)
+        raise HTTPException(status_code=404, detail=f"no job found for filename '{filename}'")
+    return get_job_result(job.id, db)
+
+
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str, db: Session = Depends(get_db)) -> JobStatusResponse:
     logger.debug("job_status_requested", job_id=job_id)

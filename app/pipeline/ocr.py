@@ -39,6 +39,9 @@ class PaddleOcrEngine(OcrEngine):
 
         lines: list[ExtractedLine] = []
         for page_result in result or []:
+            # PaddleOCR returns [None] for a page with no detectable text (blank page)
+            if not page_result:
+                continue
             for box, (text, confidence) in page_result:
                 xs = [p[0] for p in box]
                 ys = [p[1] for p in box]

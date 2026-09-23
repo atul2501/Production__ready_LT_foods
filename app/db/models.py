@@ -32,7 +32,7 @@ class Job(Base):
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     file_hash = Column(String(64), index=True, nullable=False)
-    original_filename = Column(Text, nullable=True)
+    original_filename = Column(Text, nullable=True, index=True)
     storage_key = Column(Text, nullable=False)
     status = Column(
         SAEnum(JobStatusEnum, name="job_status"),
@@ -104,6 +104,21 @@ class ProcessedEmail(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     message_id = Column(String, nullable=False, unique=True, index=True)
     processed_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class EmailIngestState(Base):
+    """Per-folder UID watermark for app/email_ingest/: only unread messages with a UID above
+    last_uid are considered, so the unread backlog that existed before the ingester was
+    first started is ignored, and each new message is looked at once instead of being
+    re-downloaded every poll. IMAP UIDs are only comparable within one uid_validity -
+    if the server reports a different one, the watermark is reset (see ingest.py)."""
+
+    __tablename__ = "email_ingest_state"
+
+    folder = Column(String, primary_key=True)
+    uid_validity = Column(BigInteger, nullable=False)
+    last_uid = Column(BigInteger, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
 
 
 class ValidationFlag(Base):

@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     # Seen and leave the message where it is.
     imap_processed_folder: str | None = None
     imap_poll_interval_seconds: float = 60.0
+    imap_timeout_seconds: float = 30.0
 
     log_level: str = "INFO"
     # When set, JSON logs are also written to this file path (in addition to stdout) - a
