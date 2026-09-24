@@ -84,6 +84,23 @@ Or by hand: `uvicorn main:app --reload` and `python email_ingest_main.py` in two
 
 ## API
 
+### Get new invoices (Postman)
+
+```
+GET http://localhost:8001/api/v1/invoices/new
+```
+
+In Postman: method **GET**, paste the URL above, no body, no headers, click **Send**.
+
+- Returns every invoice extracted from email since the last call, e.g. `[ {...}, {...} ]`.
+- Returns `[]` if there is nothing new — each invoice is returned only once.
+- "Could not get response" / connection refused means the service isn't running: check with
+  `./run.sh status` and start it with `./run.sh`.
+- Port `8001` is the `run.sh` default (`PORT=9000 ./run.sh` to change it); the systemd
+  unit uses port `8000`.
+
+### Endpoints
+
 - **GET** `/api/v1/invoices/new` — JSON array of every invoice extracted since the last call,
   oldest first. Calling it again straight away returns `[]`. Each item:
   ```json
