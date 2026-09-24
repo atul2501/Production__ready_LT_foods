@@ -28,6 +28,19 @@ def _message_id(msg: MailMessage) -> str:
     return f"no-message-id:{settings.imap_folder}:{msg.uid}"
 
 
+def allowed_senders() -> list[str]:
+    return [s.strip().lower() for s in settings.imap_allowed_senders.split(",") if s.strip()]
+
+
+def _sender_allowed(address: str | None) -> bool:
+    allowed = allowed_senders()
+    if not allowed:
+        return True
+    address = (address or "").strip().lower()
+    domain = "@" + address.rsplit("@", 1)[-1] if "@" in address else None
+    return address in allowed or (domain is not None and domain in allowed)
+
+
 def _is_pdf_attachment(att) -> bool:
     # Checks the bytes, not the declared content type (senders often label PDFs
     # application/octet-stream), and tolerates a few junk bytes before the %PDF- header
@@ -64,9 +77,14 @@ def _extract_attachment(key: str, attachment, email: EmailInfo, log) -> bool:
 
 
 def _handle_message(msg: MailMessage) -> bool | None:
-    """Extracts every PDF attachment of one email. Returns None if it has no PDF, True if
-    every PDF now has a result (so the email can be marked read), False otherwise."""
+    """Extracts every PDF attachment of one email. Returns None if it is skipped (sender not
+    in imap_allowed_senders, or no PDF), True if every PDF now has a result (so the email can
+    be marked read), False otherwise."""
     log = logger.bind(uid=msg.uid, subject=msg.subject, from_=msg.from_)
+
+    if not _sender_allowed(msg.from_):
+        log.warning("email_skipped_sender_not_allowed")
+        return None
 
     pdf_attachments = [att for att in msg.attachments if _is_pdf_attachment(att)]
     if not pdf_attachments:

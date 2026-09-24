@@ -1,8 +1,11 @@
+import secrets
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from fastapi.concurrency import run_in_threadpool
+from fastapi.security import APIKeyHeader
 
+from app.config import settings
 from app.core.exceptions import ExtractionError
 from app.logging_conf import get_logger
 from app.pipeline.run import run_pipeline
@@ -11,7 +14,20 @@ from app.schemas.envelope import InvoiceResult
 from app.storage import results_store
 
 logger = get_logger(__name__)
-router = APIRouter(prefix="/api/v1", tags=["invoices"])
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(request: Request, provided: str | None = Security(_api_key_header)) -> None:
+    if not settings.api_key:
+        logger.error("api_key_not_configured")
+        raise HTTPException(status_code=503, detail="API_KEY not configured on the server")
+    if not provided or not secrets.compare_digest(provided.encode(), settings.api_key.encode()):
+        logger.warning("api_key_rejected", client=request.client.host if request.client else None, path=request.url.path)
+        raise HTTPException(status_code=401, detail="invalid or missing X-API-Key")
+
+
+router = APIRouter(prefix="/api/v1", tags=["invoices"], dependencies=[Depends(require_api_key)])
 
 
 @router.get("/invoices/new", response_model=list[InvoiceResult])

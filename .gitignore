@@ -10,3 +10,4 @@ venv/
 data/
 logs/
 .run/
+.env

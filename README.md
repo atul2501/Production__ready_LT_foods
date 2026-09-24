@@ -62,6 +62,10 @@ Uvicorn workers or simultaneous callers each result goes to exactly one response
   and an `error` message is returned instead, and the email is marked read — so a broken
   PDF is reported to the team rather than retried forever.
 - Unread emails with no PDF are left unread and untouched.
+- **Only allowed senders are processed.** Set `IMAP_ALLOWED_SENDERS` in `.env` to the vendor
+  addresses or domains that send invoices (e.g. `ap@chep.com,@supplier.co.uk`). Mail from
+  anyone else is left unread and logged as `email_skipped_sender_not_allowed`. If it is empty,
+  every sender is accepted and a warning is logged at startup.
 - **Only emails that arrive after the first start are processed.** On first start the poller
   records the newest email's UID in `STORAGE_DIR/email_watermark.json` and ignores
   everything older, so an existing unread backlog is never downloaded. Delete that file to
@@ -90,7 +94,12 @@ Or by hand: `uvicorn main:app --reload` and `python email_ingest_main.py` in two
 GET http://localhost:8001/api/v1/invoices/new
 ```
 
-In Postman: method **GET**, paste the URL above, no body, no headers, click **Send**.
+In Postman: method **GET**, paste the URL above, then under **Headers** add
+`X-API-Key` = the `API_KEY` value from `.env`, and click **Send**. (Or use the
+**Authorization** tab: type *API Key*, key `X-API-Key`, add to *Header*.)
+
+- `401 invalid or missing X-API-Key` — the header is missing or the key is wrong.
+- `503 API_KEY not configured` — `API_KEY` isn't set in the server's `.env`.
 
 - Returns every invoice extracted from email since the last call, e.g. `[ {...}, {...} ]`.
 - Returns `[]` if there is nothing new — each invoice is returned only once.
@@ -184,11 +193,11 @@ extracted / failed / retried counts.
   (network drop, crash on their side), those results won't be returned again by the API —
   they are still in `delivered/` and must be recovered from there.
 - **`delivered/` grows forever.** Nothing cleans it up; archive or delete old files as needed.
-- **No API authentication, no rate limiting, no TLS.** Anyone who can reach the API can take
-  the pending results, including bank details and VAT numbers. Put it behind a reverse proxy
-  with TLS and add auth before exposing it beyond localhost.
-- **Secrets in a plaintext `.env`** (`OLLAMA_API_KEY`, `IMAP_PASSWORD`) — move to a real
-  secrets manager before production.
+- **API key only, no TLS, no rate limiting.** The key is sent in plain HTTP, so anyone who
+  can watch the network can read it (and the invoices). Put the API behind a reverse proxy
+  with TLS before exposing it beyond one trusted machine.
+- **Secrets in a plaintext `.env`** (`API_KEY`, `OLLAMA_API_KEY`, `IMAP_PASSWORD`). `.env` is
+  git-ignored — never commit it. Move to a real secrets manager for a proper production setup.
 - **`company_code`/`currency`** are inference-heavy (nothing to ground against) and are
   always flagged for review by design.
 - `OCR_TIMEOUT_SECONDS` gives each scanned page a wall-clock ceiling so a pathological page

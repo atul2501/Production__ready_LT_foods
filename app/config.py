@@ -16,6 +16,10 @@ class Settings(BaseSettings):
 
     storage_dir: str = "/var/lib/invoice-service/pdfs"
 
+    # Required in the X-API-Key header on /api/v1/invoices*. Unset = those endpoints refuse
+    # every request (503), so the API can't accidentally run open.
+    api_key: str | None = None
+
     grounding_fuzzy_threshold: float = 90.0
     arithmetic_tolerance_abs: float = 0.02
     arithmetic_tolerance_rel: float = 0.005
@@ -41,6 +45,10 @@ class Settings(BaseSettings):
     imap_username: str = ""
     imap_password: str = ""
     imap_folder: str = "INBOX"
+    # Comma-separated senders whose PDFs are extracted - full addresses (ap@chep.com) or
+    # whole domains (@chep.com), case-insensitive. Mail from anyone else is left unread and
+    # ignored. Empty = accept every sender (logged as a warning at startup).
+    imap_allowed_senders: str = ""
     # How many polls a PDF that fails extraction is retried on (the email stays unread
     # meanwhile) before a "failed" result is handed out and the email is marked read.
     email_max_attempts: int = 3
