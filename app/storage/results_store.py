@@ -3,6 +3,7 @@
     STORAGE_DIR/pending/    extracted, not yet handed to the team
     STORAGE_DIR/delivered/  already returned by GET /api/v1/invoices/new (kept as a backup)
     STORAGE_DIR/failed/     attempt counters for PDFs that keep failing
+    STORAGE_DIR/email_watermark.json   highest email UID already dealt with
 
 A result's key is "{received_ts}_{hash(message_id)}_{n}", so it is the same on every poll
 for the same email attachment: the poller skips any key that already exists in pending/ or
@@ -72,6 +73,23 @@ def claim_pending() -> list[dict]:
 
 def pending_count() -> int:
     return sum(1 for _ in PENDING_DIR.glob("*.json"))
+
+
+_WATERMARK_PATH = _root / "email_watermark.json"
+
+
+def load_watermark() -> dict | None:
+    """{"uid_validity": int, "last_uid": int} for the mail folder, or None on first run."""
+    try:
+        return json.loads(_WATERMARK_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def save_watermark(uid_validity: int, last_uid: int) -> None:
+    tmp_path = _WATERMARK_PATH.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps({"uid_validity": uid_validity, "last_uid": last_uid}), encoding="utf-8")
+    os.replace(tmp_path, _WATERMARK_PATH)
 
 
 def bump_fail(key: str) -> int:

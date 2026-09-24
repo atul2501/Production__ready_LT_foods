@@ -44,6 +44,7 @@ anything unverifiable is flagged `needs_review`, never silently returned as fact
 | `pending/` | extracted, not yet returned by the API |
 | `delivered/` | already returned by the API — kept as a backup; nothing deletes it |
 | `failed/` | attempt counters for PDFs that keep failing |
+| `email_watermark.json` | newest email UID already dealt with |
 
 A result's file name is `<email received time>_<hash of Message-ID>_<attachment no>.json`,
 so it is the same every time the same attachment is seen. That is what replaces the old
@@ -61,7 +62,10 @@ Uvicorn workers or simultaneous callers each result goes to exactly one response
   and an `error` message is returned instead, and the email is marked read — so a broken
   PDF is reported to the team rather than retried forever.
 - Unread emails with no PDF are left unread and untouched.
-- On first start, **every email that is currently unread** is processed.
+- **Only emails that arrive after the first start are processed.** On first start the poller
+  records the newest email's UID in `STORAGE_DIR/email_watermark.json` and ignores
+  everything older, so an existing unread backlog is never downloaded. Delete that file to
+  reset it to "from now" again.
 
 ## Running it locally
 

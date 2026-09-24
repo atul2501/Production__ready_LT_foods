@@ -1,4 +1,4 @@
-from imap_tools import AND, MailMessageFlags
+from imap_tools import AND, U, MailMessageFlags
 from imap_tools.message import MailMessage
 
 from app.config import settings
@@ -13,7 +13,8 @@ from app.storage import results_store
 logger = get_logger(__name__)
 
 # (uidvalidity, uid) of unread messages already found to have no PDF attachment. They stay
-# unread in the mailbox, so without this every poll would download them again.
+# unread in the mailbox, so while the watermark is held back behind an unfinished email,
+# this stops every poll downloading them again.
 _no_pdf_uids: set[tuple[int, int]] = set()
 
 
@@ -95,57 +96,110 @@ def _handle_message(msg: MailMessage) -> bool | None:
     return all_done
 
 
-def _mark_read(uid: str) -> None:
-    with open_mailbox() as mailbox:
-        mailbox.flag(uid, MailMessageFlags.SEEN, True)
-        if settings.imap_processed_folder:
-            mailbox.move(uid, settings.imap_processed_folder)
+def _load_watermark(mailbox) -> tuple[int, int]:
+    """Returns (uid_validity, last_uid): the highest UID in imap_folder already dealt with.
+    The first time (or after the folder's UIDVALIDITY changes, which invalidates every
+    stored UID) it starts at the folder's current highest UID - so only mail arriving from
+    then on is extracted, and the existing unread backlog is ignored without downloading it."""
+    status = mailbox.folder.status(settings.imap_folder, ("UIDNEXT", "UIDVALIDITY"))
+    uid_validity, current_max_uid = status["UIDVALIDITY"], status["UIDNEXT"] - 1
+
+    stored = results_store.load_watermark()
+    if stored is not None and stored.get("uid_validity") == uid_validity:
+        return uid_validity, stored["last_uid"]
+
+    if stored is None:
+        logger.info("email_watermark_initialized", folder=settings.imap_folder, last_uid=current_max_uid)
+    else:
+        logger.warning(
+            "email_uidvalidity_changed",
+            folder=settings.imap_folder,
+            old_uid_validity=stored.get("uid_validity"),
+            new_uid_validity=uid_validity,
+            last_uid=current_max_uid,
+        )
+    results_store.save_watermark(uid_validity, current_max_uid)
+    return uid_validity, current_max_uid
 
 
 def run_ingest_cycle() -> None:
-    """One poll: every unread email in imap_folder that has PDF attachment(s) is extracted
-    to JSON files in pending/ (see app/storage/results_store.py). An email is marked read
-    only once all of its PDFs have a result; otherwise it stays unread and is retried next
-    poll. Emails without a PDF are left unread and untouched.
+    """One poll: every unread email in imap_folder that arrived after the watermark (see
+    _load_watermark) and has PDF attachment(s) is extracted to JSON files in pending/ (see
+    app/storage/results_store.py). An email is marked read only once all of its PDFs have a
+    result; otherwise it stays unread and is retried next poll. Emails without a PDF are
+    left unread and untouched.
 
-    The IMAP connection is not held open while PDFs are extracted (that can take minutes
-    and servers drop idle connections) - each message is fetched, closed, processed, and
-    then a fresh connection marks it read."""
+    Two IMAP logins at most per poll: one to list and download the new messages, one to
+    mark the finished ones read. The connection is not held open while PDFs are extracted
+    (that can take minutes and servers drop idle connections)."""
     extracted = skipped_no_pdf = incomplete = failed = 0
 
+    # --- 1. list + download new unread messages ---
     with open_mailbox() as mailbox:
-        uid_validity = mailbox.folder.status(settings.imap_folder, ("UIDVALIDITY",))["UIDVALIDITY"]
-        unread_uids = sorted(int(uid) for uid in mailbox.uids(AND(seen=False)))
-    todo = [uid for uid in unread_uids if (uid_validity, uid) not in _no_pdf_uids]
+        uid_validity, last_uid = _load_watermark(mailbox)
+        # "N:*" always matches the folder's highest UID even when it's below N (IMAP quirk),
+        # hence the explicit > filter.
+        new_uids = sorted(
+            int(uid)
+            for uid in mailbox.uids(AND(seen=False, uid=U(str(last_uid + 1), "*")))
+            if int(uid) > last_uid
+        )
+        todo = [uid for uid in new_uids if (uid_validity, uid) not in _no_pdf_uids]
+        messages = []
+        if todo:
+            messages = sorted(
+                mailbox.fetch(AND(uid=[str(uid) for uid in todo]), mark_seen=False),
+                key=lambda m: int(m.uid),
+            )
 
-    for uid in todo:
+    # --- 2. extract PDFs (no IMAP connection open) ---
+    done: set[int] = {uid for uid in new_uids if (uid_validity, uid) in _no_pdf_uids}
+    to_mark_read: list[str] = []
+    for msg in messages:
         try:
-            with open_mailbox() as mailbox:
-                msg = next(iter(mailbox.fetch(AND(uid=str(uid)), mark_seen=False)), None)
-            if msg is None:
-                continue  # deleted/moved since the uid list was taken
-
             outcome = _handle_message(msg)
-            if outcome is None:
-                _no_pdf_uids.add((uid_validity, uid))
-                skipped_no_pdf += 1
-            elif outcome:
-                _mark_read(msg.uid)
-                extracted += 1
-            else:
-                incomplete += 1
         except Exception:  # noqa: BLE001 - one bad message must not abort the whole cycle
             failed += 1
-            logger.exception("email_ingest_message_failed", uid=uid)
+            logger.exception("email_ingest_message_failed", uid=msg.uid)
+            continue
+        if outcome is None:
+            _no_pdf_uids.add((uid_validity, int(msg.uid)))
+            done.add(int(msg.uid))
+            skipped_no_pdf += 1
+        elif outcome:
+            to_mark_read.append(msg.uid)
+        else:
+            incomplete += 1
+
+    # --- 3. mark finished emails read, then advance the watermark ---
+    if to_mark_read:
+        with open_mailbox() as mailbox:
+            mailbox.flag(to_mark_read, MailMessageFlags.SEEN, True)
+            if settings.imap_processed_folder:
+                mailbox.move(to_mark_read, settings.imap_processed_folder)
+        done.update(int(uid) for uid in to_mark_read)
+        extracted = len(to_mark_read)
+
+    # The watermark stops just before the first email that isn't finished, so that one is
+    # retried next poll. Finished emails after it are read (or cached as no-PDF), so they
+    # aren't picked up again - and results_store.exists() dedups them regardless.
+    new_watermark = last_uid
+    for uid in new_uids:
+        if uid not in done:
+            break
+        new_watermark = uid
+    if new_watermark > last_uid:
+        results_store.save_watermark(uid_validity, new_watermark)
 
     # Logged every cycle (not just when something is found) so a quiet log unambiguously
     # means "polled, nothing new" rather than "ingester is stuck or not running".
     logger.info(
         "email_ingest_cycle_complete",
-        unread=len(unread_uids),
+        new_unread=len(new_uids),
         extracted=extracted,
         skipped_no_pdf=skipped_no_pdf,
         retry_next_poll=incomplete,
         failed=failed,
+        last_uid=new_watermark,
         pending_results=results_store.pending_count(),
     )
