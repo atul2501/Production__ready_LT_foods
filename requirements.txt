@@ -14,4 +14,3 @@ numpy==1.26.4
 rapidfuzz==3.9.7
 prometheus-client==0.21.0
 imap-tools==1.6.0
-#winget install --id PostgreSQL.PostgreSQL.16 -e --accept-package-agreements --accept-source-agreements

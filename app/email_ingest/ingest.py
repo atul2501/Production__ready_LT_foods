@@ -4,7 +4,6 @@ from imap_tools.message import MailMessage
 from app.config import settings
 from app.email_ingest.client import open_mailbox
 from app.logging_conf import get_logger
-from app.metrics import JOBS_COMPLETED, PIPELINE_DURATION_SECONDS
 from app.pipeline.run import run_pipeline
 from app.pipeline.to_response import build_failure, build_result
 from app.schemas.envelope import EmailInfo
@@ -55,14 +54,11 @@ def _extract_attachment(key: str, attachment, email: EmailInfo, log) -> bool:
         failure = build_failure(key, f"{type(exc).__name__}: {exc}", attachment.filename, email)
         results_store.write_pending(key, failure.model_dump(mode="json"))
         results_store.clear_fail(key)
-        JOBS_COMPLETED.labels(status="failed").inc()
         return True
 
     item = build_result(key, result, attachment.filename, email)
     results_store.write_pending(key, item.model_dump(mode="json"))
     results_store.clear_fail(key)
-    JOBS_COMPLETED.labels(status=result["status"]).inc()
-    PIPELINE_DURATION_SECONDS.observe(result["processing_time_ms"] / 1000)
     log.info("pdf_extracted", key=key, filename=attachment.filename, status=result["status"])
     return True
 

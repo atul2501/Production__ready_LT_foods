@@ -170,10 +170,9 @@ sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-r
 ## Monitoring
 
 `GET /metrics` exposes `invoice_results_pending` (results waiting to be fetched) and the Ollama
-request/token counters for calls made inside the API process. Extraction outcome counters are
-incremented in the email poller process, which has no HTTP server, so they are not scraped —
-use the `email_ingest_cycle_complete` log line (logged every poll) to watch extracted / failed
-/ retried counts.
+request/token counters for calls made inside the API process. The email poller has no HTTP
+server, so use its `email_ingest_cycle_complete` log line (logged every poll) to watch
+extracted / failed / retried counts.
 
 ## Key risks (read before treating this as fully production-ready)
 

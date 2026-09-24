@@ -9,5 +9,4 @@ venv/
 
 data/
 logs/
-backups/
 .run/
