@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Runs the whole service - API + worker + email ingester - in the background and keeps it
-# running: any service that crashes or exits is restarted automatically (with backoff), so
-# one bad moment (Gmail dropping the connection, Postgres restarting, OOM) doesn't leave
-# the system half-down. Works in Git Bash / MSYS2 on Windows and on Linux/EC2.
+# Runs the whole service - API + email poller - in the background and keeps it running:
+# any service that crashes or exits is restarted automatically (with backoff), so one bad
+# moment (Gmail dropping the connection, OOM) doesn't leave the system half-down. Works in Git Bash / MSYS2 on Windows and on Linux/EC2.
 #
 #   ./run.sh            start everything in the background (returns immediately)
 #   ./run.sh stop       stop everything
@@ -26,14 +25,14 @@ RUN_LOG="$LOG_DIR/run.log"
 MAIN_PID_FILE="$RUN_DIR/main.pid"
 RUN_ID_FILE="$RUN_DIR/run.id"
 STOP_FLAG="$RUN_DIR/stopping"
-SERVICES=(api worker email)
+SERVICES=(api email)
 # A service that stayed up at least this long is considered healthy again, so its restart
 # delay resets to the minimum instead of staying at the backed-off value.
 HEALTHY_AFTER_SECONDS=60
 MIN_RESTART_DELAY=2
 MAX_RESTART_DELAY=60
-# Linux only: the worker finishes its in-flight jobs on SIGTERM; after this long it is
-# force-killed. Safe either way - a killed job's lease is reclaimed and the job retried.
+# Linux only: how long a service gets to exit on SIGTERM before it is force-killed. Safe
+# either way - an email whose PDFs weren't all extracted stays unread and is retried.
 STOP_GRACE_SECONDS=30
 
 # IS_WINDOWS: the services are native Windows processes - either run from Git Bash/MSYS2,
@@ -73,7 +72,6 @@ read_pid() {
 service_pattern() {
   case "$1" in
     api)    echo "uvicorn main:app" ;;
-    worker) echo "worker_main.py" ;;
     email)  echo "email_ingest_main.py" ;;
   esac
 }
@@ -83,7 +81,7 @@ service_pattern() {
 # that starts the real C:\PythonXY\python.exe as its child). MSYS/Git Bash/WSL `kill`
 # does not reliably terminate those, and pids differ between Git Bash, MSYS2 and WSL - so
 # instead of trusting pid files, services are found by what they actually are: this
-# project's venv python running one of the three service commands. That is also what
+# project's venv python running one of the service commands. That is also what
 # catches copies left behind by an earlier crashed or killed run, whichever terminal
 # started it.
 
@@ -101,7 +99,6 @@ win_service_pids() {
         ForEach-Object {
           $c = $_.CommandLine
           if ($c -like "*uvicorn main:app*") { "$($_.ProcessId) api" }
-          elseif ($c -like "*worker_main.py*") { "$($_.ProcessId) worker" }
           elseif ($c -like "*email_ingest_main.py*") { "$($_.ProcessId) email" }
         }' </dev/null 2>/dev/null | tr -d '\r'
 }
@@ -130,7 +127,6 @@ win_winpid() {
 run_service() {
   case "$1" in
     api)    exec "$PY" -m uvicorn main:app --host 0.0.0.0 --port "$PORT" --no-use-colors >/dev/null 2>>"$RUN_LOG" ;;
-    worker) exec "$PY" worker_main.py >/dev/null 2>>"$RUN_LOG" ;;
     email)  exec "$PY" email_ingest_main.py >/dev/null 2>>"$RUN_LOG" ;;
   esac
 }
@@ -147,7 +143,7 @@ find_venv_python() {
     echo "No .venv found - create it first: python -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
     exit 1
   fi
-  if ! "$PY" -c "import alembic, uvicorn" 2>/dev/null; then
+  if ! "$PY" -c "import uvicorn" 2>/dev/null; then
     echo "Dependencies missing in .venv - run: $PY -m pip install -r requirements.txt" >&2
     exit 1
   fi
@@ -166,25 +162,9 @@ port_is_free() {
   "$PY" -c "import socket, sys; socket.socket().bind(('0.0.0.0', int(sys.argv[1])))" "$PORT" 2>/dev/null
 }
 
-run_migrations() {
-  log "applying database migrations"
-  # Retried rather than fatal: on a server reboot Postgres may still be starting up.
-  # Bounded so a real config error (wrong DATABASE_URL/password) fails loudly.
-  local attempts=24 attempt=1   # x 5s = 2 minutes
-  until "$PY" -m alembic upgrade head; do
-    if (( attempt >= attempts )); then
-      log "migrations still failing after $attempts attempts - check Postgres is running and DATABASE_URL in .env"
-      return 1
-    fi
-    log "migrations failed (attempt $attempt/$attempts) - retrying in 5s"
-    attempt=$(( attempt + 1 ))
-    sleep 5
-  done
-}
-
 # Runs one service forever: start it, wait for it to exit, restart it after a delay that
-# doubles on each quick crash (2s, 4s, ... 60s) so a service that can't start (bad config,
-# DB down) doesn't spin, but recovers on its own once the cause is fixed.
+# doubles on each quick crash (2s, 4s, ... 60s) so a service that can't start (bad config)
+# doesn't spin, but recovers on its own once the cause is fixed.
 supervise() {
   local name=$1
   local delay=$MIN_RESTART_DELAY
@@ -332,7 +312,7 @@ clear_run_state() {
   rm -f "$RUN_DIR"/*.pid "$RUN_DIR"/*.winpid "$RUN_ID_FILE" "$STOP_FLAG"
 }
 
-# The background process: supervises the three services until told to stop.
+# The background process: supervises the services until told to stop.
 daemon() {
   echo "$$ $ENV_KIND" > "$MAIN_PID_FILE"
   (( IS_WINDOWS )) && win_winpid $$ > "$RUN_DIR/main.winpid"
@@ -394,14 +374,13 @@ start() {
   fi
   clear_run_state
 
-  # Done here in the foreground so a broken venv, busy port or database shows up
+  # Done here in the foreground so a broken venv or busy port shows up
   # immediately in the terminal instead of only inside a log file.
   find_venv_python
   if ! port_is_free; then
     echo "Port $PORT is already in use by another program - stop it, or start on another port: PORT=9000 ./run.sh" >&2
     return 1
   fi
-  run_migrations || return 1
 
   log "starting in background"
   nohup "$0" __daemon >> "$RUN_LOG" 2>&1 < /dev/null &

@@ -9,9 +9,9 @@ app = FastAPI(
     title="LT Foods Invoice Extraction API",
     version="1.0.0",
     description=(
-        "Upload a scanned/digital invoice PDF and receive structured JSON for SAP "
-        "MIRO/FB60 posting. SAP decides routing based on po_number; this API only "
-        "populates fields."
+        "Invoice PDFs arriving by email are extracted to structured JSON for SAP "
+        "MIRO/FB60 posting; GET /api/v1/invoices/new returns each new result once. "
+        "SAP decides routing based on po_number; this API only populates fields."
     ),
 )
 

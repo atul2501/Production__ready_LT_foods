@@ -21,4 +21,4 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check app scripts main.py worker_main.py
+        run: ruff check app main.py email_ingest_main.py

@@ -1,29 +1,16 @@
 import os
 
 import httpx
-from fastapi import APIRouter, Depends
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+from fastapi import APIRouter
 
-from app.api.deps import get_db
 from app.config import settings
-from app.db import models
-from app.db.base import engine
-from app.storage.local_fs import LocalFileStorage
+from app.storage import results_store
 
 router = APIRouter(tags=["health"])
-storage = LocalFileStorage(settings.storage_dir)
 
 
 def _dependency_checks() -> dict[str, str]:
     checks: dict[str, str] = {}
-
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        checks["database"] = "ok"
-    except Exception as exc:  # noqa: BLE001
-        checks["database"] = f"error: {exc}"
 
     for host in settings.ollama_hosts.split(","):
         host = host.strip()
@@ -37,10 +24,10 @@ def _dependency_checks() -> dict[str, str]:
             checks[f"ollama:{host}"] = f"error: {exc}"
 
     try:
-        if os.access(storage.root, os.W_OK):
+        if os.access(results_store.PENDING_DIR, os.W_OK):
             checks["storage"] = "ok"
         else:
-            checks["storage"] = f"error: {storage.root} is not writable"
+            checks["storage"] = f"error: {results_store.PENDING_DIR} is not writable"
     except Exception as exc:  # noqa: BLE001
         checks["storage"] = f"error: {exc}"
 
@@ -64,36 +51,15 @@ def readyz():
 
 
 @router.get("/api/v1/health")
-def api_health(db: Session = Depends(get_db)):
+def api_health():
     """Versioned health endpoint for API consumers/monitoring dashboards (as opposed to
     /healthz and /readyz, which are the unprefixed paths orchestrators expect). Same
-    dependency checks as /readyz, plus operational signals: how deep the processing
-    queue currently is and how job outcomes are trending, so a caller can tell "up but
-    falling behind" apart from "fully healthy" without grepping logs."""
+    dependency checks as /readyz, plus how many extracted results are waiting to be
+    fetched from /api/v1/invoices/new."""
     checks = _dependency_checks()
-
-    queued: int | None = None
-    processing: int | None = None
-    try:
-        queued = db.scalar(
-            select(func.count()).select_from(models.Job).where(models.Job.status == models.JobStatusEnum.queued)
-        )
-        processing = db.scalar(
-            select(func.count())
-            .select_from(models.Job)
-            .where(models.Job.status == models.JobStatusEnum.processing)
-        )
-    except Exception as exc:  # noqa: BLE001 - a health endpoint must never itself throw
-        checks.setdefault("database", f"error: {exc}")
-
     healthy = all(value == "ok" for value in checks.values())
     return {
         "status": "ok" if healthy else "degraded",
         "checks": checks,
-        "queue": {
-            "queued_jobs": queued,
-            "processing_jobs": processing,
-            "max_backlog": settings.max_queue_backlog,
-            "backlog_full": (queued or 0) >= settings.max_queue_backlog,
-        },
+        "pending_results": results_store.pending_count(),
     }

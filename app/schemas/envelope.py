@@ -7,9 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from app.schemas.invoice_schema import AdditionalField, InvoiceHeader, LineItem
 
 
-class JobStatus(str, Enum):
-    QUEUED = "queued"
-    PROCESSING = "processing"
+class ResultStatus(str, Enum):
     SUCCESS = "success"
     NEEDS_REVIEW = "needs_review"
     FAILED = "failed"
@@ -32,28 +30,27 @@ class ExtractionMetadata(BaseModel):
     prompt_version: Optional[str] = None
     extraction_source: Optional[str] = None
     processing_time_ms: Optional[int] = None
-    created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
 
 
-class JobCreatedResponse(BaseModel):
-    job_id: str
-    status: JobStatus
-    created_at: datetime
+class EmailInfo(BaseModel):
+    message_id: str
+    sender: Optional[str] = None
+    subject: Optional[str] = None
+    received_at: Optional[datetime] = None
 
 
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: JobStatus
-    created_at: datetime
-    updated_at: datetime
-    failure_reason: Optional[str] = None
+class InvoiceResult(BaseModel):
+    """One extracted PDF. Written to STORAGE_DIR/pending/ by the email poller and returned
+    as-is by GET /api/v1/invoices/new. status "failed" means the PDF could not be extracted
+    after every attempt - invoice_header is null and error says why."""
 
-
-class JobResultResponse(BaseModel):
-    job_id: str
-    status: JobStatus
-    invoice_header: InvoiceHeader
-    line_items: list[LineItem]
-    additional_fields: list[AdditionalField]
-    metadata: ExtractionMetadata
+    id: str
+    status: ResultStatus
+    filename: Optional[str] = None
+    email: Optional[EmailInfo] = None
+    invoice_header: Optional[InvoiceHeader] = None
+    line_items: list[LineItem] = []
+    additional_fields: list[AdditionalField] = []
+    metadata: ExtractionMetadata = ExtractionMetadata()
+    error: Optional[str] = None

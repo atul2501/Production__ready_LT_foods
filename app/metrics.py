@@ -1,8 +1,7 @@
-"""Prometheus metrics shared between the API process and the worker process. Both import
-this module, so counters incremented in the worker (job outcomes, Ollama usage) and gauges
-set in the API's /metrics handler (queue depth) end up in the same registry that the API's
-/metrics endpoint serves - Prometheus only ever scrapes the API process, not the worker
-directly, since the worker has no HTTP server of its own.
+"""Prometheus metrics. Note each process has its own registry and only the API process
+serves /metrics, so counters incremented in the email poller process (extraction outcomes,
+Ollama usage) are not scraped - only activity inside the API process (POST
+/api/v1/invoices) and the pending gauge show up there.
 """
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -12,8 +11,7 @@ JOBS_COMPLETED = Counter(
     ["status"],
 )
 
-JOBS_QUEUED = Gauge("invoice_jobs_queued", "Jobs currently queued")
-JOBS_PROCESSING = Gauge("invoice_jobs_processing", "Jobs currently being processed")
+RESULTS_PENDING = Gauge("invoice_results_pending", "Extracted results not yet fetched via /api/v1/invoices/new")
 
 PIPELINE_DURATION_SECONDS = Histogram(
     "invoice_pipeline_duration_seconds",

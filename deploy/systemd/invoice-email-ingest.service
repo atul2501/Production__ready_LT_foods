@@ -1,7 +1,6 @@
 [Unit]
 Description=LT Foods Invoice Extraction Email Ingest (IMAP mailbox watcher)
-After=network.target postgresql.service
-Wants=postgresql.service
+After=network.target
 
 [Service]
 Type=simple
@@ -12,9 +11,8 @@ EnvironmentFile=/opt/invoice-service/.env
 ExecStart=/opt/invoice-service/.venv/bin/python email_ingest_main.py
 Restart=on-failure
 RestartSec=5
-# One ingest cycle (IMAP fetch + a handful of DB inserts) finishes in seconds, so SIGTERM
-# only needs to wait out whatever cycle is currently in flight, unlike the worker's
-# multi-minute extraction jobs.
+# A cycle extracts PDFs inline and can take minutes, so SIGTERM may kill one mid-PDF -
+# safe: an email is only marked read once all its PDFs have a result, so it is retried.
 TimeoutStopSec=60
 
 [Install]

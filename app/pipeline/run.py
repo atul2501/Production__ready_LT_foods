@@ -19,9 +19,8 @@ from app.pipeline.triage import triage_pdf
 logger = get_logger(__name__)
 
 # Shared, bounded thread pool that OCRs scanned pages, sized by ocr_page_workers rather than
-# one pool per job - this keeps the number of concurrently-loaded PaddleOCR instances equal
-# to ocr_page_workers process-wide no matter how many jobs (worker_concurrency) or pages are
-# in flight at once, instead of multiplying worker_concurrency by pages-in-flight.
+# one pool per PDF - this keeps the number of concurrently-loaded PaddleOCR instances equal
+# to ocr_page_workers process-wide no matter how many PDFs or pages are in flight at once.
 _ocr_executor_lock = threading.Lock()
 _ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
