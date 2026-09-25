@@ -7,11 +7,12 @@
 #   ./run.sh stop       stop everything
 #   ./run.sh restart    stop, then start
 #   ./run.sh status     show what's running
-#   ./run.sh logs       follow logs/run.log + logs/app.log (Ctrl+C stops following only)
+#   ./run.sh logs       follow logs/run.log + today's logs/app-<date>.log (Ctrl+C stops following only)
 #   PORT=9000 ./run.sh  API on a different port (default 8001)
 #
 # Logs:
-#   logs/app.log  - everything the app does (JSON, one line per event) - LOG_FILE in .env
+#   logs/app-<date>.log - everything the app does (JSON, one line per event), one file per
+#                   day, deleted after LOG_RETENTION_DAYS (default 30) - LOG_FILE in .env
 #   logs/run.log  - service starts/stops/crashes/restarts, plus any error output a service
 #                   prints outside the app log (crash tracebacks, uvicorn startup errors)
 set -uo pipefail
@@ -122,7 +123,7 @@ win_winpid() {
 
 # Run in a background subshell; exec makes the service itself the process behind $!.
 # stdout is dropped because it's the same JSON the app already writes to LOG_FILE
-# (logs/app.log); stderr goes to run.log so a crash traceback or a uvicorn startup error
+# (logs/app-<date>.log); stderr goes to run.log so a crash traceback or a uvicorn startup error
 # is never lost.
 run_service() {
   case "$1" in
@@ -392,7 +393,7 @@ start() {
   status || true
   echo
   echo "Running in the background. API: http://localhost:$PORT/docs"
-  echo "Logs:   logs/app.log (app)   logs/run.log (starts/stops/crashes)"
+  echo "Logs:   logs/app-<date>.log (app)   logs/run.log (starts/stops/crashes)"
   echo "        ./run.sh logs     to follow both"
   echo "Stop:   ./run.sh stop"
 }
@@ -440,6 +441,12 @@ stop() {
 
 mkdir -p "$RUN_DIR" "$LOG_DIR" data/pdfs
 touch "$RUN_LOG"
+# run.log only grows on starts/stops/crashes, but never let it grow without limit: once it
+# passes RUN_LOG_MAX_BYTES, keep just its most recent lines.
+RUN_LOG_MAX_BYTES=5000000
+if [ "$(wc -c < "$RUN_LOG")" -gt "$RUN_LOG_MAX_BYTES" ]; then
+  tail -n 5000 "$RUN_LOG" > "$RUN_LOG.tmp" && mv -f "$RUN_LOG.tmp" "$RUN_LOG"
+fi
 
 case "${1:-start}" in
   start)    start ;;
@@ -449,7 +456,7 @@ case "${1:-start}" in
     if out=$(status); then echo "Running:"; else echo "Not running:"; fi
     echo "$out"
     ;;
-  logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app.log" ;;
+  logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app-$(date +%Y-%m-%d).log" ;;
   __daemon) daemon ;;
   *)
     echo "usage: $0 [start|stop|restart|status|logs]" >&2

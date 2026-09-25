@@ -170,11 +170,13 @@ sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-r
 - **stdout**: structured JSON (via `structlog`, `app/logging_conf.py`) — every pipeline stage
   logs its own start/complete event with a `duration_ms`, correlated by the result key.
   Under systemd this goes to `journalctl`.
-- **`LOG_FILE`** (optional): the same JSON lines also appended to a file. It has no built-in
-  size cap — `deploy/logrotate/invoice-service` rotates it daily via `logrotate`:
-  ```bash
-  sudo cp deploy/logrotate/invoice-service /etc/logrotate.d/invoice-service
-  ```
+- **`LOG_FILE`** (e.g. `./logs/app.log`): the same JSON lines are also written to **one file
+  per day** next to it — `logs/app-2026-09-25.log`, `logs/app-2026-09-26.log`, … Files older
+  than `LOG_RETENTION_DAYS` (default **30**) are deleted automatically when the day changes.
+  Works the same on Windows and Linux; no `logrotate` needed.
+- **`logs/run.log`** (written by `run.sh`: starts, stops, crashes): when it passes 5 MB,
+  `run.sh` keeps only its last 5,000 lines the next time it runs.
+- `./run.sh logs` follows `run.log` and today's app log.
 
 ## Monitoring
 

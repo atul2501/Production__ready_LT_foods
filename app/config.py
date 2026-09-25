@@ -60,9 +60,11 @@ class Settings(BaseSettings):
     imap_timeout_seconds: float = 30.0
 
     log_level: str = "INFO"
-    # When set, JSON logs are also written to this file path (in addition to stdout) - a
-    # real filesystem path now that everything runs natively, no volume indirection needed.
+    # When set, JSON logs are also written to one file per day next to this path
+    # (logs/app.log -> logs/app-2026-09-25.log), in addition to stdout. Files older than
+    # log_retention_days are deleted automatically.
     log_file: str | None = None
+    log_retention_days: int = 30
 
 
 settings = Settings()
