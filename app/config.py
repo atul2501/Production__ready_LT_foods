@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # Original PDFs are kept in STORAGE_DIR/files/ so GET /api/v1/invoices/{id}/pdf can
     # show them; files older than this are deleted. 0 = keep forever.
     pdf_retention_days: int = 30
+    # PDFs uploaded to POST /api/v1/invoices are extracted in the background, at most this
+    # many at once per API worker process (the rest wait their turn).
+    upload_max_concurrent: int = 2
+    # An upload job still "processing" after this long was cut off (API restarted mid-
+    # extraction) and is reported as failed - upload the PDF again.
+    upload_job_timeout_seconds: int = 1800
 
     # Required in the X-API-Key header on /api/v1/invoices*. Unset = those endpoints refuse
     # every request (503), so the API can't accidentally run open.

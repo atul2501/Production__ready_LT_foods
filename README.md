@@ -45,6 +45,7 @@ anything unverifiable is flagged `needs_review`, never silently returned as fact
 | `delivered/` | already returned by the API — kept as a backup; nothing deletes it |
 | `failed/` | attempt counters for PDFs that keep failing |
 | `files/` | the original PDF of each result (served by `/api/v1/invoices/{id}/pdf`), deleted after `PDF_RETENTION_DAYS` (default 30) |
+| `jobs/` | PDFs uploaded to `POST /api/v1/invoices`: `<id>.processing` while extracting, then `<id>.json`, deleted after `PDF_RETENTION_DAYS` |
 | `email_watermark.json` | newest email UID already dealt with |
 
 A result's file name is `<email received time>_<hash of Message-ID>_<attachment no>.json`,
@@ -130,12 +131,23 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
   }
   ```
   `metadata.flags` lists exactly which fields need a human look and why.
-- **GET** `/api/v1/invoices/{id}/pdf` — the original PDF behind a result (its `pdf_url`), shown
-  inline in the browser/Postman. Needs `X-API-Key` too. 404 once it is older than
-  `PDF_RETENTION_DAYS` (default 30; `0` = keep forever).
-- **POST** `/api/v1/invoices` — for testing: send one PDF (Postman `form-data` key `file`,
-  or a raw binary body) and get the same JSON back directly, once extraction finishes.
-  Nothing is saved.
+- **POST** `/api/v1/invoices` — upload one PDF (Postman `form-data` key `file`, or a raw
+  binary body). Answers at once with `202` and a job id; the PDF is extracted in the
+  background (at most `UPLOAD_MAX_CONCURRENT`, default 2, at a time per API process):
+  ```json
+  {"id": "5b0c...", "status": "processing",
+   "result_url": "/api/v1/invoices/5b0c...", "pdf_url": "/api/v1/invoices/5b0c.../pdf"}
+  ```
+  Uploads are not returned by `/invoices/new` — fetch them by id.
+- **GET** `/api/v1/invoices/{id}` — the JSON for a job id (or an email result's `id`; this
+  doesn't claim it from `/invoices/new`). `202` + `"status": "processing"` while still
+  extracting — call again in a few seconds; `200` + the full result (same shape as above)
+  once done. A job still processing after `UPLOAD_JOB_TIMEOUT_SECONDS` (default 1800) was cut
+  off by an API restart and is returned as `failed` — upload it again.
+- **GET** `/api/v1/invoices/{id}/pdf` — the original PDF (the result's `pdf_url`), shown
+  inline in the browser/Postman.
+- Job results and PDFs are kept for `PDF_RETENTION_DAYS` (default 30; `0` = keep forever),
+  then these return 404. All three need `X-API-Key`.
 - **GET** `/api/v1/health` — Ollama/storage checks plus `pending_results` (how many results
   are waiting to be fetched). `/healthz` and `/readyz` are for process-manager probes.
 - **GET** `/metrics` — Prometheus scrape endpoint (see [Monitoring](#monitoring)).

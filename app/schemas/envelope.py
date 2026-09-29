@@ -48,8 +48,7 @@ class InvoiceResult(BaseModel):
     id: str
     status: ResultStatus
     filename: Optional[str] = None
-    # Path of the original PDF on this API (GET, same X-API-Key) - null for direct uploads,
-    # which aren't stored.
+    # Path of the original PDF on this API (GET, same X-API-Key).
     pdf_url: Optional[str] = None
     email: Optional[EmailInfo] = None
     invoice_header: Optional[InvoiceHeader] = None
@@ -57,3 +56,13 @@ class InvoiceResult(BaseModel):
     additional_fields: list[AdditionalField] = []
     metadata: ExtractionMetadata = ExtractionMetadata()
     error: Optional[str] = None
+
+
+class JobAccepted(BaseModel):
+    """Answer to POST /api/v1/invoices (and to GET /api/v1/invoices/{id} while the upload
+    is still being extracted): fetch result_url for the JSON, pdf_url for the PDF."""
+
+    id: str
+    status: str  # "processing"
+    result_url: str
+    pdf_url: str

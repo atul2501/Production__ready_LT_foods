@@ -4,6 +4,8 @@
     STORAGE_DIR/delivered/  already returned by GET /api/v1/invoices/new (kept as a backup)
     STORAGE_DIR/failed/     attempt counters for PDFs that keep failing
     STORAGE_DIR/files/      the original PDF of each result, served by GET /api/v1/invoices/{id}/pdf
+    STORAGE_DIR/jobs/       PDFs uploaded to POST /api/v1/invoices: <id>.processing while
+                            extracting, then <id>.json (the result, served by GET /api/v1/invoices/{id})
     STORAGE_DIR/email_watermark.json   highest email UID already dealt with
 
 A result's key is "{received_ts}_{hash(message_id)}_{n}", so it is the same on every poll
@@ -28,8 +30,9 @@ PENDING_DIR = _root / "pending"
 DELIVERED_DIR = _root / "delivered"
 FAILED_DIR = _root / "failed"
 PDF_DIR = _root / "files"
+JOBS_DIR = _root / "jobs"
 
-for _dir in (PENDING_DIR, DELIVERED_DIR, FAILED_DIR, PDF_DIR):
+for _dir in (PENDING_DIR, DELIVERED_DIR, FAILED_DIR, PDF_DIR, JOBS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -88,11 +91,11 @@ def pdf_url(key: str) -> str:
 
 def save_pdf(key: str, content: bytes) -> None:
     """Keeps the original PDF for GET /api/v1/invoices/{id}/pdf, and deletes stored PDFs
-    older than pdf_retention_days while at it."""
+    and upload jobs older than pdf_retention_days while at it."""
     tmp_path = PDF_DIR / f"{key}.pdf.tmp"
     tmp_path.write_bytes(content)
     os.replace(tmp_path, PDF_DIR / f"{key}.pdf")
-    _delete_old_pdfs()
+    _delete_old_files()
 
 
 def pdf_path(key: str) -> Path | None:
@@ -102,16 +105,50 @@ def pdf_path(key: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _delete_old_pdfs() -> None:
+def _delete_old_files() -> None:
     if settings.pdf_retention_days <= 0:
         return
     cutoff = time.time() - settings.pdf_retention_days * 86400
-    for old in PDF_DIR.glob("*.pdf"):
+    for old in [*PDF_DIR.glob("*.pdf"), *JOBS_DIR.glob("*.json")]:
         try:
             if old.stat().st_mtime < cutoff:
                 old.unlink()
         except OSError:
             pass
+
+
+def start_job(job_id: str) -> None:
+    (JOBS_DIR / f"{job_id}.processing").touch()
+
+
+def finish_job(job_id: str, data: dict) -> None:
+    tmp_path = JOBS_DIR / f"{job_id}.json.tmp"
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, JOBS_DIR / f"{job_id}.json")
+    (JOBS_DIR / f"{job_id}.processing").unlink(missing_ok=True)
+
+
+def get_result(key: str) -> dict | None:
+    """The finished result for an id - an uploaded job, or an email result (pending or
+    delivered; looking it up doesn't claim it). None if there is no finished result."""
+    if not _KEY_PATTERN.match(key):
+        return None
+    for folder in (JOBS_DIR, DELIVERED_DIR, PENDING_DIR):
+        try:
+            return json.loads((folder / f"{key}.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+    return None
+
+
+def job_started_at(job_id: str) -> float | None:
+    """When an upload job still being extracted was started (epoch seconds), else None."""
+    if not _KEY_PATTERN.match(job_id):
+        return None
+    try:
+        return (JOBS_DIR / f"{job_id}.processing").stat().st_mtime
+    except FileNotFoundError:
+        return None
 
 
 def pending_count() -> int:
