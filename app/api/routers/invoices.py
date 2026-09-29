@@ -3,6 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Security
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 
 from app.config import settings
@@ -36,6 +37,16 @@ def get_new_invoices() -> list[dict]:
     returned exactly once: calling again straight away returns []. Results are extracted in
     the background by the email poller (email_ingest_main.py), so this responds instantly."""
     return results_store.claim_pending()
+
+
+@router.get("/invoices/{result_id}/pdf", response_class=FileResponse)
+def get_invoice_pdf(result_id: str) -> FileResponse:
+    """The original PDF of an email-extracted invoice (the result's pdf_url), shown inline
+    in the browser/Postman. Kept for PDF_RETENTION_DAYS (default 30)."""
+    path = results_store.pdf_path(result_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    return FileResponse(path, media_type="application/pdf", filename=path.name, content_disposition_type="inline")
 
 
 @router.post("/invoices", response_model=InvoiceResult)
@@ -75,4 +86,6 @@ async def extract_invoice(request: Request) -> InvoiceResult:
         logger.error("extraction_failed", result_id=result_id, error=str(exc))
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return build_result(result_id, result, filename, email=None)
+    response = build_result(result_id, result, filename, email=None)
+    logger.info("upload_result", result_id=result_id, result=response.model_dump(mode="json"))
+    return response

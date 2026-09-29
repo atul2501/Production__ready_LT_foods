@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     ollama_api_key: str | None = None
 
     storage_dir: str = "/var/lib/invoice-service/pdfs"
+    # Original PDFs are kept in STORAGE_DIR/files/ so GET /api/v1/invoices/{id}/pdf can
+    # show them; files older than this are deleted. 0 = keep forever.
+    pdf_retention_days: int = 30
 
     # Required in the X-API-Key header on /api/v1/invoices*. Unset = those endpoints refuse
     # every request (503), so the API can't accidentally run open.

@@ -3,6 +3,7 @@
     STORAGE_DIR/pending/    extracted, not yet handed to the team
     STORAGE_DIR/delivered/  already returned by GET /api/v1/invoices/new (kept as a backup)
     STORAGE_DIR/failed/     attempt counters for PDFs that keep failing
+    STORAGE_DIR/files/      the original PDF of each result, served by GET /api/v1/invoices/{id}/pdf
     STORAGE_DIR/email_watermark.json   highest email UID already dealt with
 
 A result's key is "{received_ts}_{hash(message_id)}_{n}", so it is the same on every poll
@@ -12,6 +13,8 @@ delivered/, and file names sort oldest-first.
 import hashlib
 import json
 import os
+import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,8 +27,9 @@ _root = Path(settings.storage_dir).resolve()
 PENDING_DIR = _root / "pending"
 DELIVERED_DIR = _root / "delivered"
 FAILED_DIR = _root / "failed"
+PDF_DIR = _root / "files"
 
-for _dir in (PENDING_DIR, DELIVERED_DIR, FAILED_DIR):
+for _dir in (PENDING_DIR, DELIVERED_DIR, FAILED_DIR, PDF_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -50,7 +54,7 @@ def write_pending(key: str, data: dict) -> None:
     tmp_path = PENDING_DIR / f"{key}.json.tmp"
     tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp_path, final_path)
-    logger.info("result_written", key=key)
+    logger.info("result_written", key=key, result=data)
 
 
 def claim_pending() -> list[dict]:
@@ -64,11 +68,50 @@ def claim_pending() -> list[dict]:
         except FileNotFoundError:
             continue  # another request claimed it first
         try:
-            results.append(json.loads(target.read_text(encoding="utf-8")))
+            result = json.loads(target.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             logger.exception("result_unreadable", file=str(target))
+            continue
+        results.append(result)
+        logger.info("result_delivered", key=path.stem, result=result)
     logger.info("results_claimed", count=len(results))
     return results
+
+
+# Keys come from result_key(); anything else (e.g. "../") must never reach the filesystem.
+_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def pdf_url(key: str) -> str:
+    return f"/api/v1/invoices/{key}/pdf"
+
+
+def save_pdf(key: str, content: bytes) -> None:
+    """Keeps the original PDF for GET /api/v1/invoices/{id}/pdf, and deletes stored PDFs
+    older than pdf_retention_days while at it."""
+    tmp_path = PDF_DIR / f"{key}.pdf.tmp"
+    tmp_path.write_bytes(content)
+    os.replace(tmp_path, PDF_DIR / f"{key}.pdf")
+    _delete_old_pdfs()
+
+
+def pdf_path(key: str) -> Path | None:
+    if not _KEY_PATTERN.match(key):
+        return None
+    path = PDF_DIR / f"{key}.pdf"
+    return path if path.is_file() else None
+
+
+def _delete_old_pdfs() -> None:
+    if settings.pdf_retention_days <= 0:
+        return
+    cutoff = time.time() - settings.pdf_retention_days * 86400
+    for old in PDF_DIR.glob("*.pdf"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
 
 
 def pending_count() -> int:

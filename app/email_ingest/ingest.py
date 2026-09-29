@@ -56,8 +56,10 @@ def _extract_attachment(key: str, attachment, email: EmailInfo, log) -> bool:
     """Runs the pipeline on one PDF and writes its result to pending/. Returns True once
     this attachment has a result file (success, needs_review, or a final failure), False if
     it failed and should be retried on the next poll."""
+    pdf_bytes = _strip_to_pdf_header(attachment.payload)
+    results_store.save_pdf(key, pdf_bytes)
     try:
-        result = run_pipeline(_strip_to_pdf_header(attachment.payload), key)
+        result = run_pipeline(pdf_bytes, key)
     except Exception as exc:  # noqa: BLE001 - one bad PDF must not stop the rest
         attempts = results_store.bump_fail(key)
         log.exception("pdf_extraction_failed", key=key, filename=attachment.filename, attempt=attempts)
@@ -65,11 +67,13 @@ def _extract_attachment(key: str, attachment, email: EmailInfo, log) -> bool:
             return False
         # Out of attempts - hand the team a "failed" result instead of retrying forever.
         failure = build_failure(key, f"{type(exc).__name__}: {exc}", attachment.filename, email)
+        failure.pdf_url = results_store.pdf_url(key)
         results_store.write_pending(key, failure.model_dump(mode="json"))
         results_store.clear_fail(key)
         return True
 
     item = build_result(key, result, attachment.filename, email)
+    item.pdf_url = results_store.pdf_url(key)
     results_store.write_pending(key, item.model_dump(mode="json"))
     results_store.clear_fail(key)
     log.info("pdf_extracted", key=key, filename=attachment.filename, status=result["status"])

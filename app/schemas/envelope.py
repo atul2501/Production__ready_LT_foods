@@ -48,6 +48,9 @@ class InvoiceResult(BaseModel):
     id: str
     status: ResultStatus
     filename: Optional[str] = None
+    # Path of the original PDF on this API (GET, same X-API-Key) - null for direct uploads,
+    # which aren't stored.
+    pdf_url: Optional[str] = None
     email: Optional[EmailInfo] = None
     invoice_header: Optional[InvoiceHeader] = None
     line_items: list[LineItem] = []

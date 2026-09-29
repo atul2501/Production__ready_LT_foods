@@ -44,6 +44,7 @@ anything unverifiable is flagged `needs_review`, never silently returned as fact
 | `pending/` | extracted, not yet returned by the API |
 | `delivered/` | already returned by the API — kept as a backup; nothing deletes it |
 | `failed/` | attempt counters for PDFs that keep failing |
+| `files/` | the original PDF of each result (served by `/api/v1/invoices/{id}/pdf`), deleted after `PDF_RETENTION_DAYS` (default 30) |
 | `email_watermark.json` | newest email UID already dealt with |
 
 A result's file name is `<email received time>_<hash of Message-ID>_<attachment no>.json`,
@@ -117,6 +118,7 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
     "id": "20260924T101500Z_3f2a9c1b7d4e_1",
     "status": "success | needs_review | failed",
     "filename": "INV-123.pdf",
+    "pdf_url": "/api/v1/invoices/20260924T101500Z_3f2a9c1b7d4e_1/pdf",
     "email": {"message_id": "...", "sender": "...", "subject": "...", "received_at": "..."},
     "invoice_header": {...},
     "line_items": [...],
@@ -128,6 +130,9 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
   }
   ```
   `metadata.flags` lists exactly which fields need a human look and why.
+- **GET** `/api/v1/invoices/{id}/pdf` — the original PDF behind a result (its `pdf_url`), shown
+  inline in the browser/Postman. Needs `X-API-Key` too. 404 once it is older than
+  `PDF_RETENTION_DAYS` (default 30; `0` = keep forever).
 - **POST** `/api/v1/invoices` — for testing: send one PDF (Postman `form-data` key `file`,
   or a raw binary body) and get the same JSON back directly, once extraction finishes.
   Nothing is saved.
