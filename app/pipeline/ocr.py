@@ -1,9 +1,12 @@
 import io
 import time
+import numpy as np
+from PIL import Image
 from abc import ABC, abstractmethod
 
 from app.logging_conf import get_logger
 from app.pipeline.text_extract import ExtractedLine
+from paddleocr import PaddleOCR  # heavy import, deferred until actually used
 
 logger = get_logger(__name__)
 
@@ -18,7 +21,6 @@ class PaddleOcrEngine(OcrEngine):
     and layout/table awareness than Tesseract, at the cost of a heavier install."""
 
     def __init__(self, lang: str = "en"):
-        from paddleocr import PaddleOCR  # heavy import, deferred until actually used
 
         logger.info("ocr_engine_initializing", engine="paddleocr", lang=lang)
         started = time.monotonic()
@@ -30,8 +32,6 @@ class PaddleOcrEngine(OcrEngine):
         )
 
     def ocr_page_image(self, image_bytes: bytes, page_number: int) -> list[ExtractedLine]:
-        import numpy as np
-        from PIL import Image
 
         started = time.monotonic()
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")

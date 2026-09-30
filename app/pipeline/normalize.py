@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-
 from app.pipeline.text_extract import ExtractedLine
 
 

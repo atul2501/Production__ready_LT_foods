@@ -1,7 +1,5 @@
 from dataclasses import dataclass
-
 import fitz  # PyMuPDF
-
 from app.config import settings
 
 

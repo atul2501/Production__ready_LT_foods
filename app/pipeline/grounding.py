@@ -1,9 +1,7 @@
 import re
 from dataclasses import dataclass
 from datetime import datetime
-
 from rapidfuzz import fuzz
-
 from app.config import settings
 from app.core.constants import INFERRED_FIELDS, SAP_MANAGED_LINE_FIELDS
 from app.schemas.invoice_schema import InvoiceExtraction

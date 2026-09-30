@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-
 from app.config import settings
 from app.core.constants import CRITICAL_HEADER_STRING_FIELDS
 from app.pipeline.business_rules import RuleViolation

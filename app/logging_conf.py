@@ -3,9 +3,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
-
 import structlog
-
 from app.config import settings
 
 

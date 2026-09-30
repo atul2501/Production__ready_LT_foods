@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-
 from app.api.routers import health, invoices, metrics
 from app.logging_conf import configure_logging
 
