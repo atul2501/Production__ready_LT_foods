@@ -15,8 +15,9 @@ class Settings(BaseSettings):
     ollama_api_key: str | None = None
 
     storage_dir: str = "/var/lib/invoice-service/pdfs"
-    # Original PDFs are kept in STORAGE_DIR/files/ so GET /api/v1/invoices/{id}/pdf can
-    # show them; files older than this are deleted. 0 = keep forever.
+    # Original PDFs (STORAGE_DIR/files/), upload job results (jobs/) and email results already
+    # handed out (delivered/) older than this are deleted. pending/ is never deleted.
+    # 0 = keep forever.
     pdf_retention_days: int = 30
     # PDFs uploaded to POST /api/v1/invoices are extracted in the background, at most this
     # many at once per API worker process (the rest wait their turn).

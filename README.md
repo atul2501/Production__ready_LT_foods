@@ -42,7 +42,7 @@ anything unverifiable is flagged `needs_review`, never silently returned as fact
 | Folder | Contents |
 |---|---|
 | `pending/` | extracted, not yet returned by the API |
-| `delivered/` | already returned by the API — kept as a backup; nothing deletes it |
+| `delivered/` | already returned by the API — kept as a backup, deleted after `PDF_RETENTION_DAYS` (default 30) |
 | `failed/` | attempt counters for PDFs that keep failing |
 | `files/` | the original PDF of each result (served by `/api/v1/invoices/{id}/pdf`), deleted after `PDF_RETENTION_DAYS` (default 30) |
 | `jobs/` | PDFs uploaded to `POST /api/v1/invoices`: `<id>.processing` while extracting, then `<id>.json`, deleted after `PDF_RETENTION_DAYS` |
@@ -146,7 +146,7 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
   off by an API restart and is returned as `failed` — upload it again.
 - **GET** `/api/v1/invoices/{id}/pdf` — the original PDF (the result's `pdf_url`), shown
   inline in the browser/Postman.
-- Job results and PDFs are kept for `PDF_RETENTION_DAYS` (default 30; `0` = keep forever),
+- Job results, delivered email results and PDFs are kept for `PDF_RETENTION_DAYS` (default 30; `0` = keep forever),
   then these return 404. All three need `X-API-Key`.
 - **GET** `/api/v1/health` — Ollama/storage checks plus `pending_results` (how many results
   are waiting to be fetched). `/healthz` and `/readyz` are for process-manager probes.
@@ -211,7 +211,8 @@ extracted / failed / retried counts.
   `delivered/` as it returns them. If the caller's request fails after the server responded
   (network drop, crash on their side), those results won't be returned again by the API —
   they are still in `delivered/` and must be recovered from there.
-- **`delivered/` grows forever.** Nothing cleans it up; archive or delete old files as needed.
+- **`delivered/` is only kept for `PDF_RETENTION_DAYS`.** Back it up if you need a longer
+  record of what was handed out. `pending/` (not yet returned) is never deleted.
 - **API key only, no TLS, no rate limiting.** The key is sent in plain HTTP, so anyone who
   can watch the network can read it (and the invoices). Put the API behind a reverse proxy
   with TLS before exposing it beyond one trusted machine.

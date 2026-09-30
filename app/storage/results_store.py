@@ -1,7 +1,7 @@
 """File-based store for extracted invoice JSON - replaces the Postgres tables.
 
     STORAGE_DIR/pending/    extracted, not yet handed to the team
-    STORAGE_DIR/delivered/  already returned by GET /api/v1/invoices/new (kept as a backup)
+    STORAGE_DIR/delivered/  already returned by GET /api/v1/invoices/new (kept pdf_retention_days)
     STORAGE_DIR/failed/     attempt counters for PDFs that keep failing
     STORAGE_DIR/files/      the original PDF of each result, served by GET /api/v1/invoices/{id}/pdf
     STORAGE_DIR/jobs/       PDFs uploaded to POST /api/v1/invoices: <id>.processing while
@@ -90,8 +90,8 @@ def pdf_url(key: str) -> str:
 
 
 def save_pdf(key: str, content: bytes) -> None:
-    """Keeps the original PDF for GET /api/v1/invoices/{id}/pdf, and deletes stored PDFs
-    and upload jobs older than pdf_retention_days while at it."""
+    """Keeps the original PDF for GET /api/v1/invoices/{id}/pdf, and deletes stored PDFs,
+    upload jobs and delivered email results older than pdf_retention_days while at it."""
     tmp_path = PDF_DIR / f"{key}.pdf.tmp"
     tmp_path.write_bytes(content)
     os.replace(tmp_path, PDF_DIR / f"{key}.pdf")
@@ -109,7 +109,9 @@ def _delete_old_files() -> None:
     if settings.pdf_retention_days <= 0:
         return
     cutoff = time.time() - settings.pdf_retention_days * 86400
-    for old in [*PDF_DIR.glob("*.pdf"), *JOBS_DIR.glob("*.json")]:
+    # pending/ is never cleaned: those results haven't been handed out yet. Deleting a
+    # delivered result can't cause re-extraction - the email watermark already moved past it.
+    for old in [*PDF_DIR.glob("*.pdf"), *JOBS_DIR.glob("*.json"), *DELIVERED_DIR.glob("*.json")]:
         try:
             if old.stat().st_mtime < cutoff:
                 old.unlink()
