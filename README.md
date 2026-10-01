@@ -154,6 +154,52 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
   are waiting to be fetched). `/healthz` and `/readyz` are for process-manager probes.
 - **GET** `/metrics` — Prometheus scrape endpoint (see [Monitoring](#monitoring)).
 
+### Hiding or showing fields in the result
+
+Every field in `invoice_header` and `line_items` is defined once, in
+[app/schemas/invoice_schema.py](app/schemas/invoice_schema.py) (`InvoiceHeader`, `LineItem`).
+The API returns all of them **except** the ones hidden in
+[app/schemas/envelope.py](app/schemas/envelope.py). Hidden today: `company_code` (header) and
+`gl_account`, `cost_center`, `profit_center` (line items) — SAP fills these itself.
+
+**Hide a field** — add one line to `InvoiceHeaderOut` (header field) or `LineItemOut`
+(line-item field) in `app/schemas/envelope.py`:
+
+```python
+class LineItemOut(LineItem):
+    gl_account: Optional[str] = Field(default=None, exclude=True)
+    cost_center: Optional[str] = Field(default=None, exclude=True)
+    profit_center: Optional[str] = Field(default=None, exclude=True)
+    reference_code: Optional[str] = Field(default=None, exclude=True)   # <- newly hidden
+```
+
+- Use the same type as in `invoice_schema.py`, and **always give a default**: `None` for
+  `Optional[...]`, `""` for `str`, `0` for `float`. Required fields (`description`, `amount`,
+  `invoice_number`, `vendor_name`, ...) especially need it — stored results no longer contain
+  the hidden field, and without a default reading them back fails (500 on `GET /invoices/{id}`).
+- The field is still extracted, but it is left out of the API response, the stored result
+  JSON and the `/docs` schema (results stored earlier are hidden too), and it never raises a
+  flag in `metadata.flags` — so it can't put a result into `needs_review` either
+  ([app/pipeline/status.py](app/pipeline/status.py) reads the hidden list from `envelope.py`).
+  Hide a mandatory field like `invoice_number` and a missing value goes unflagged too.
+
+**Show a hidden field again** — delete its line from `InvoiceHeaderOut` / `LineItemOut`.
+Results stored while it was hidden don't contain it, so for those it comes back empty
+(`null`/`""`); results extracted from now on have it filled.
+
+**Add a new field** (something the extraction doesn't produce yet, e.g. a vendor email):
+
+1. Add it to `InvoiceHeader` or `LineItem` in `app/schemas/invoice_schema.py`, as optional
+   with a default — `vendor_email: Optional[str] = None` — so results stored before it
+   existed still load. It then appears in the API result automatically (the `...Out`
+   classes inherit every field).
+2. In [app/pipeline/llm_structurer.py](app/pipeline/llm_structurer.py): add it to
+   `EXAMPLE_JSON` (in the same place), list it under rule `3b` (optional fields) in
+   `SYSTEM_INSTRUCTIONS`, and bump `PROMPT_VERSION` (e.g. `"v3"` → `"v4"`) so results show
+   which prompt produced them. Without the prompt change the LLM won't fill it.
+
+After any of these changes, restart: `./run.sh restart` (on the server too).
+
 ## Extraction engine: Ollama Cloud (gemma4:31b)
 
 The current model is **`gemma4:31b`** (`OLLAMA_MODEL` in `.env`), run on
@@ -189,13 +235,14 @@ sudo cp deploy/systemd/*.service /etc/systemd/system/ && sudo systemctl daemon-r
 - **stdout**: structured JSON (via `structlog`, `app/logging_conf.py`) — every pipeline stage
   logs its own start/complete event with a `duration_ms`, correlated by the result key.
   Under systemd this goes to `journalctl`.
-- **`LOG_FILE`** (e.g. `./logs/app.log`): the same JSON lines are also written to **one file
-  per day** next to it — `logs/app-2026-09-25.log`, `logs/app-2026-09-26.log`, … Files older
-  than `LOG_RETENTION_DAYS` (default **30**) are deleted automatically when the day changes.
+- **`LOG_FILE`** (default `./logs/app.log`): the same JSON lines are also written there.
+  `app.log` always holds **today**; when the day changes, the previous day's file is moved to
+  `logs/app-2026-09-25.log`, `logs/app-2026-09-26.log`, … Dated files older than
+  `LOG_RETENTION_DAYS` (default **30**) are deleted automatically.
   Works the same on Windows and Linux; no `logrotate` needed.
 - **`logs/run.log`** (written by `run.sh`: starts, stops, crashes): when it passes 5 MB,
   `run.sh` keeps only its last 5,000 lines the next time it runs.
-- `./run.sh logs` follows `run.log` and today's app log.
+- `./run.sh logs` follows `run.log` and `app.log`.
 
 ## Monitoring
 

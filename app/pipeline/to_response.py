@@ -3,7 +3,9 @@ from app.schemas.envelope import (
     OUTPUT_DATE_FORMAT,
     EmailInfo,
     ExtractionMetadata,
+    InvoiceHeaderOut,
     InvoiceResult,
+    LineItemOut,
     ResultStatus,
     ValidationFlag,
 )
@@ -20,8 +22,9 @@ def build_result(result_id: str, pipeline_result: dict, filename: str | None, em
     """Maps run_pipeline()'s return value to the JSON shape the API hands out."""
     extraction = pipeline_result["extraction"]
     # Reformatted here, after grounding, so grounding still checks the LLM's raw value.
-    header = extraction.invoice_header.model_copy(
-        update={
+    header = InvoiceHeaderOut.model_validate(
+        {
+            **extraction.invoice_header.model_dump(),
             "invoice_date": _format_date(extraction.invoice_header.invoice_date),
             "due_date": _format_date(extraction.invoice_header.due_date),
         }
@@ -32,7 +35,7 @@ def build_result(result_id: str, pipeline_result: dict, filename: str | None, em
         filename=filename,
         email=email,
         invoice_header=header,
-        line_items=extraction.line_items,
+        line_items=[LineItemOut.model_validate(item.model_dump()) for item in extraction.line_items],
         additional_fields=extraction.additional_fields,
         metadata=ExtractionMetadata(
             flags=[ValidationFlag(**flag) for flag in pipeline_result["flags"]],

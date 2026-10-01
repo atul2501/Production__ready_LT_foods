@@ -62,7 +62,9 @@ def get_invoice(result_id: str):
     result. 202 with status "processing" while an upload is still being extracted, 200 with
     the full result once it is done (status success / needs_review / failed)."""
     logger.info("get_invoice_request", result_id=result_id)
-    result = results_store.get_result(result_id)
+    logger.info("hello")
+    logger.info("welcome")
+    result =results_store.get_result(result_id)
     if result is not None:
         logger.info("get_invoice_response", result_id=result_id, status_code=200, response=result)
         return result
@@ -79,6 +81,7 @@ def get_invoice(result_id: str):
         return failure
     content = _job_accepted(result_id).model_dump(mode="json")
     logger.info("get_invoice_response", result_id=result_id, status_code=202, response=content)
+    logger.info(f"->{content}")
     return JSONResponse(status_code=202, content=content)
 
 

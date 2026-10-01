@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Optional
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PlainSerializer
 from app.schemas.invoice_schema import AdditionalField, InvoiceHeader, LineItem
 
 OUTPUT_DATE_FORMAT = "%d.%m.%Y"
@@ -25,6 +25,20 @@ OutputDate = Annotated[
     BeforeValidator(_parse_output_date),
     PlainSerializer(lambda value: value.strftime(OUTPUT_DATE_FORMAT), return_type=str, when_used="json"),
 ]
+
+
+# The extraction still produces these fields (the LLM schema and the grounding/business
+# rule checks use them), but they are left out of every API response and stored result -
+# SAP fills them itself. exclude=True drops them from the JSON and from the API docs; the
+# defaults let a stored result without them be read back.
+class InvoiceHeaderOut(InvoiceHeader):
+    company_code: str = Field(default="", exclude=True)
+
+
+class LineItemOut(LineItem):
+    gl_account: Optional[str] = Field(default=None, exclude=True)
+    cost_center: Optional[str] = Field(default=None, exclude=True)
+    profit_center: Optional[str] = Field(default=None, exclude=True)
 
 
 class ResultStatus(str, Enum):
@@ -71,8 +85,8 @@ class InvoiceResult(BaseModel):
     # Path of the original PDF on this API (GET, same X-API-Key).
     pdf_url: Optional[str] = None
     email: Optional[EmailInfo] = None
-    invoice_header: Optional[InvoiceHeader] = None
-    line_items: list[LineItem] = []
+    invoice_header: Optional[InvoiceHeaderOut] = None
+    line_items: list[LineItemOut] = []
     additional_fields: list[AdditionalField] = []
     metadata: ExtractionMetadata = ExtractionMetadata()
     error: Optional[str] = None

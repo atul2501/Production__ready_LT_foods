@@ -4,8 +4,24 @@ from app.core.constants import CRITICAL_HEADER_STRING_FIELDS
 from app.pipeline.business_rules import RuleViolation
 from app.pipeline.grounding import FieldGroundingResult
 from app.pipeline.normalize import NormalizedDocument
+from app.schemas.envelope import InvoiceHeaderOut, LineItemOut
 
 _CRITICAL_PATHS = {f"invoice_header.{name}" for name in CRITICAL_HEADER_STRING_FIELDS}
+
+# Fields hidden from the API result (exclude=True in envelope.py) - SAP fills them itself, so
+# they never raise a flag or put a result into needs_review.
+_HIDDEN_HEADER_FIELDS = {name for name, f in InvoiceHeaderOut.model_fields.items() if f.exclude}
+_HIDDEN_LINE_FIELDS = {name for name, f in LineItemOut.model_fields.items() if f.exclude}
+
+
+def _is_hidden(field_path: str) -> bool:
+    """field_path is "invoice_header.<name>" or "line_items[<i>].<name>"."""
+    section, _, name = field_path.partition(".")
+    if section == "invoice_header":
+        return name in _HIDDEN_HEADER_FIELDS
+    if section.startswith("line_items["):
+        return name in _HIDDEN_LINE_FIELDS
+    return False
 
 
 @dataclass
@@ -24,6 +40,8 @@ def assign_status(
     has_warning = False
 
     for violation in rule_violations:
+        if _is_hidden(violation.field):
+            continue
         flags.append(
             {
                 "field": violation.field,
@@ -38,6 +56,8 @@ def assign_status(
             has_warning = True
 
     for result in grounding_results:
+        if _is_hidden(result.field_path):
+            continue
         if result.match_type == "unexpected_sap_field":
             flags.append({"field": result.field_path, "reason": "sap_managed_field_populated", "severity": "warning"})
             has_warning = True

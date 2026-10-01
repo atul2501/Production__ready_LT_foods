@@ -7,12 +7,12 @@
 #   ./run.sh stop       stop everything
 #   ./run.sh restart    stop, then start
 #   ./run.sh status     show what's running
-#   ./run.sh logs       follow logs/run.log + today's logs/app-<date>.log (Ctrl+C stops following only)
+#   ./run.sh logs       follow logs/run.log + logs/app.log (Ctrl+C stops following only)
 #   PORT=9000 ./run.sh  API on a different port (default 8001)
 #
 # Logs:
-#   logs/app-<date>.log - everything the app does (JSON, one line per event), one file per
-#                   day, deleted after LOG_RETENTION_DAYS (default 30) - LOG_FILE in .env
+#   logs/app.log  - everything the app does today (JSON, one line per event); earlier days are
+#                   moved to logs/app-<date>.log, deleted after LOG_RETENTION_DAYS (default 30) - LOG_FILE in .env
 #   logs/run.log  - service starts/stops/crashes/restarts, plus any error output a service
 #                   prints outside the app log (crash tracebacks, uvicorn startup errors)
 set -uo pipefail
@@ -123,7 +123,7 @@ win_winpid() {
 
 # Run in a background subshell; exec makes the service itself the process behind $!.
 # stdout is dropped because it's the same JSON the app already writes to LOG_FILE
-# (logs/app-<date>.log); stderr goes to run.log so a crash traceback or a uvicorn startup error
+# (logs/app.log); stderr goes to run.log so a crash traceback or a uvicorn startup error
 # is never lost.
 run_service() {
   case "$1" in
@@ -349,6 +349,48 @@ daemon() {
   wait
 }
 
+# Git Bash must not be launched as a child of WSL: every Windows process started through
+# WSL interop is killed when the WSL command that launched it exits, so the services died
+# seconds after start (with "child_copy ... Win32 error 299" fork errors in run.log).
+# Win32_Process.Create starts it via the WMI service instead, outside this WSL session.
+# Its output goes to a file, shown here once it finishes.
+start_via_git_bash() {
+  local gitbash='C:\Program Files\Git\bin\bash.exe'
+  if [ ! -x "/mnt/c/Program Files/Git/bin/bash.exe" ]; then
+    echo "Running under WSL, but the services must be started from Git Bash on Windows" >&2
+    echo "(Git for Windows not found at C:\\Program Files\\Git). Start it from a Git Bash terminal." >&2
+    return 1
+  fi
+  echo "(WSL detected - starting via Git Bash so the services don't depend on this WSL session)"
+
+  local out="$RUN_DIR/start.out" done_file="$RUN_DIR/start.done"
+  rm -f "$out" "$done_file"
+  local project
+  project=$(wslpath -m "$PWD")
+  local cmd="\"$gitbash\" -c \"cd '$project' && PORT=$PORT ./run.sh start > $out 2>&1; echo \$? > $done_file\""
+  if ! RUN_CMD="$cmd" WSLENV="RUN_CMD${WSLENV:+:$WSLENV}" powershell.exe -NoProfile -NonInteractive -Command '
+      $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $env:RUN_CMD }
+      if ($r.ReturnValue -ne 0) { Write-Error "Win32_Process.Create failed: $($r.ReturnValue)"; exit 1 }' </dev/null; then
+    echo "Could not launch Git Bash - start it from a Git Bash terminal instead." >&2
+    return 1
+  fi
+
+  local waited=0
+  while [ ! -s "$done_file" ] && (( waited < 120 )); do
+    sleep 1
+    waited=$(( waited + 1 ))
+  done
+  cat "$out" 2>/dev/null
+  if [ ! -s "$done_file" ]; then
+    echo "Git Bash start did not finish within 120s - check './run.sh status' and logs/run.log" >&2
+    return 1
+  fi
+  local code
+  code=$(tr -dc '0-9' < "$done_file")
+  rm -f "$out" "$done_file"
+  return "${code:-1}"
+}
+
 start() {
   # From WSL, the services would be Windows processes owned through WSL's interop bridge,
   # which WSL tears down when the terminal/session that started them closes - leaving the
@@ -356,14 +398,7 @@ start() {
   # plain Windows processes instead, so hand the start over to it. (This also covers an
   # MSYS2 terminal whose `bash` resolves to WSL's C:\Windows\System32\bash.exe.)
   if (( IS_WSL )); then
-    local gitbash="/mnt/c/Program Files/Git/bin/bash.exe"
-    if [ ! -x "$gitbash" ]; then
-      echo "Running under WSL, but the services must be started from Git Bash on Windows" >&2
-      echo "(Git for Windows not found at C:\\Program Files\\Git). Start it from a Git Bash terminal." >&2
-      return 1
-    fi
-    echo "(WSL detected - starting via Git Bash so the services don't depend on this WSL session)"
-    PORT="$PORT" WSLENV="PORT${WSLENV:+:$WSLENV}" "$gitbash" ./run.sh start
+    start_via_git_bash
     return
   fi
 
@@ -393,7 +428,7 @@ start() {
   status || true
   echo
   echo "Running in the background. API: http://localhost:$PORT/docs"
-  echo "Logs:   logs/app-<date>.log (app)   logs/run.log (starts/stops/crashes)"
+  echo "Logs:   logs/app.log (app, today)   logs/run.log (starts/stops/crashes)"
   echo "        ./run.sh logs     to follow both"
   echo "Stop:   ./run.sh stop"
 }
@@ -456,7 +491,7 @@ case "${1:-start}" in
     if out=$(status); then echo "Running:"; else echo "Not running:"; fi
     echo "$out"
     ;;
-  logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app-$(date +%Y-%m-%d).log" ;;
+  logs)     tail -n 50 -F "$RUN_LOG" "$LOG_DIR/app.log" ;;
   __daemon) daemon ;;
   *)
     echo "usage: $0 [start|stop|restart|status|logs]" >&2

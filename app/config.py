@@ -70,10 +70,11 @@ class Settings(BaseSettings):
     imap_timeout_seconds: float = 30.0
 
     log_level: str = "INFO"
-    # When set, JSON logs are also written to one file per day next to this path
-    # (logs/app.log -> logs/app-2026-09-25.log), in addition to stdout. Files older than
-    # log_retention_days are deleted automatically.
-    log_file: str | None = None
+    # JSON logs are also written to this file (in addition to stdout). It always holds today;
+    # earlier days are moved to logs/app-2026-09-25.log etc., and those older than
+    # log_retention_days are deleted automatically. A bare folder such as "logs" means
+    # logs/app.log; relative paths are from the project root.
+    log_file: str | None = "logs/app.log"
     log_retention_days: int = 30
 
 
