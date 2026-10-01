@@ -130,7 +130,9 @@ In Postman: method **GET**, paste the URL above, then under **Headers** add
     "error": null
   }
   ```
-  `metadata.flags` lists exactly which fields need a human look and why.
+  `metadata.flags` lists exactly which fields need a human look and why. Every date
+  (`invoice_date`, `due_date`, `received_at`, `completed_at`) is `DD.MM.YYYY`. Timestamps
+  are date only. An invoice date that can't be parsed is returned exactly as extracted.
 - **POST** `/api/v1/invoices` — upload one PDF (Postman `form-data` key `file`, or a raw
   binary body). Answers at once with `202` and a job id; the PDF is extracted in the
   background (at most `UPLOAD_MAX_CONCURRENT`, default 2, at a time per API process):

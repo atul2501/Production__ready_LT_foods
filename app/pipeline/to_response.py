@@ -1,4 +1,6 @@
+from app.pipeline.grounding import parse_date
 from app.schemas.envelope import (
+    OUTPUT_DATE_FORMAT,
     EmailInfo,
     ExtractionMetadata,
     InvoiceResult,
@@ -7,15 +9,29 @@ from app.schemas.envelope import (
 )
 
 
+def _format_date(value: str | None) -> str | None:
+    """DD.MM.YYYY for the API. A value that isn't a recognisable date is passed through
+    unchanged rather than dropped or guessed at."""
+    parsed = parse_date(value) if value else None
+    return parsed.strftime(OUTPUT_DATE_FORMAT) if parsed else value
+
+
 def build_result(result_id: str, pipeline_result: dict, filename: str | None, email: EmailInfo | None) -> InvoiceResult:
     """Maps run_pipeline()'s return value to the JSON shape the API hands out."""
     extraction = pipeline_result["extraction"]
+    # Reformatted here, after grounding, so grounding still checks the LLM's raw value.
+    header = extraction.invoice_header.model_copy(
+        update={
+            "invoice_date": _format_date(extraction.invoice_header.invoice_date),
+            "due_date": _format_date(extraction.invoice_header.due_date),
+        }
+    )
     return InvoiceResult(
         id=result_id,
         status=ResultStatus(pipeline_result["status"]),
         filename=filename,
         email=email,
-        invoice_header=extraction.invoice_header,
+        invoice_header=header,
         line_items=extraction.line_items,
         additional_fields=extraction.additional_fields,
         metadata=ExtractionMetadata(

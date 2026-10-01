@@ -1,8 +1,14 @@
 from datetime import datetime
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 from app.schemas.invoice_schema import AdditionalField, InvoiceHeader, LineItem
+
+OUTPUT_DATE_FORMAT = "%d.%m.%Y"
+
+
+def _date_only(value: Optional[datetime]) -> Optional[str]:
+    return value.strftime(OUTPUT_DATE_FORMAT) if value else None
 
 
 class ResultStatus(str, Enum):
@@ -30,12 +36,20 @@ class ExtractionMetadata(BaseModel):
     processing_time_ms: Optional[int] = None
     completed_at: Optional[datetime] = None
 
+    @field_serializer("completed_at")
+    def _serialize_completed_at(self, value: Optional[datetime]) -> Optional[str]:
+        return _date_only(value)
+
 
 class EmailInfo(BaseModel):
     message_id: str
     sender: Optional[str] = None
     subject: Optional[str] = None
     received_at: Optional[datetime] = None
+
+    @field_serializer("received_at")
+    def _serialize_received_at(self, value: Optional[datetime]) -> Optional[str]:
+        return _date_only(value)
 
 
 class InvoiceResult(BaseModel):

@@ -51,7 +51,7 @@ def _check_numeric_field(value: float, number_candidates: set[str]) -> bool:
     return _normalize_number(value) in number_candidates
 
 
-def _parse_date(value: str) -> datetime | None:
+def parse_date(value: str) -> datetime | None:
     for fmt in _DATE_FORMATS:
         try:
             return datetime.strptime(value.strip(), fmt)
@@ -61,7 +61,7 @@ def _parse_date(value: str) -> datetime | None:
 
 
 def _check_date_field(value: str, source_text_normalized: str) -> tuple[bool, str, float]:
-    parsed = _parse_date(value)
+    parsed = parse_date(value)
     if parsed is None:
         return _check_text_field(value, source_text_normalized)
     candidates = {
