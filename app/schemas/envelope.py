@@ -1,14 +1,30 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional
-from pydantic import BaseModel, ConfigDict, field_serializer
+from typing import Annotated, Optional
+from pydantic import BaseModel, BeforeValidator, ConfigDict, PlainSerializer
 from app.schemas.invoice_schema import AdditionalField, InvoiceHeader, LineItem
 
 OUTPUT_DATE_FORMAT = "%d.%m.%Y"
 
 
-def _date_only(value: Optional[datetime]) -> Optional[str]:
-    return value.strftime(OUTPUT_DATE_FORMAT) if value else None
+def _parse_output_date(value: object) -> object:
+    # Stored results are read back through these models (GET /invoices/...), so a
+    # DD.MM.YYYY string written by the serializer below must validate again. Anything else
+    # (a datetime, or an ISO string in results stored before this format) is left to pydantic.
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, OUTPUT_DATE_FORMAT)
+        except ValueError:
+            pass
+    return value
+
+
+# A timestamp the API hands out as a date only, DD.MM.YYYY.
+OutputDate = Annotated[
+    datetime,
+    BeforeValidator(_parse_output_date),
+    PlainSerializer(lambda value: value.strftime(OUTPUT_DATE_FORMAT), return_type=str, when_used="json"),
+]
 
 
 class ResultStatus(str, Enum):
@@ -34,22 +50,14 @@ class ExtractionMetadata(BaseModel):
     prompt_version: Optional[str] = None
     extraction_source: Optional[str] = None
     processing_time_ms: Optional[int] = None
-    completed_at: Optional[datetime] = None
-
-    @field_serializer("completed_at")
-    def _serialize_completed_at(self, value: Optional[datetime]) -> Optional[str]:
-        return _date_only(value)
+    completed_at: Optional[OutputDate] = None
 
 
 class EmailInfo(BaseModel):
     message_id: str
     sender: Optional[str] = None
     subject: Optional[str] = None
-    received_at: Optional[datetime] = None
-
-    @field_serializer("received_at")
-    def _serialize_received_at(self, value: Optional[datetime]) -> Optional[str]:
-        return _date_only(value)
+    received_at: Optional[OutputDate] = None
 
 
 class InvoiceResult(BaseModel):
