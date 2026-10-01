@@ -61,19 +61,25 @@ def get_invoice(result_id: str):
     """The JSON for one id: the job id returned by POST /invoices, or the id of an email
     result. 202 with status "processing" while an upload is still being extracted, 200 with
     the full result once it is done (status success / needs_review / failed)."""
+    logger.info("get_invoice_request", result_id=result_id)
     result = results_store.get_result(result_id)
     if result is not None:
+        logger.info("get_invoice_response", result_id=result_id, status_code=200, response=result)
         return result
 
     started_at = results_store.job_started_at(result_id)
     if started_at is None:
+        logger.warning("get_invoice_response", result_id=result_id, status_code=404, response="no invoice or job with this id")
         raise HTTPException(status_code=404, detail="no invoice or job with this id")
     if time.time() - started_at > settings.upload_job_timeout_seconds:
         # The API restarted mid-extraction, so this job will never finish.
         failure = build_failure(result_id, "extraction was interrupted - upload the PDF again", None, None)
         failure.pdf_url = results_store.pdf_url(result_id)
+        logger.info("get_invoice_response", result_id=result_id, status_code=200, response=failure.model_dump(mode="json"))
         return failure
-    return JSONResponse(status_code=202, content=_job_accepted(result_id).model_dump(mode="json"))
+    content = _job_accepted(result_id).model_dump(mode="json")
+    logger.info("get_invoice_response", result_id=result_id, status_code=202, response=content)
+    return JSONResponse(status_code=202, content=content)
 
 
 @router.post("/invoices", response_model=JobAccepted, status_code=202)
@@ -111,8 +117,9 @@ async def extract_invoice(request: Request) -> JobAccepted:
     results_store.save_pdf(job_id, content)
     results_store.start_job(job_id)
     _upload_executor.submit(_run_upload_job, job_id, content, filename)
-    logger.info("upload_job_created", job_id=job_id, filename=filename)
-    return _job_accepted(job_id)
+    accepted = _job_accepted(job_id)
+    logger.info("upload_job_created", job_id=job_id, filename=filename, response=accepted.model_dump(mode="json"))
+    return accepted
 
 
 def _job_accepted(job_id: str) -> JobAccepted:
