@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 
 from app.logging_conf import get_logger
 from app.pipeline.text_extract import ExtractedLine
-from paddleocr import PaddleOCR  # heavy import, deferred until actually used
+from paddleocr import PaddleOCR  # heavy import (loads paddle at module import time)
 
 logger = get_logger(__name__)
 
